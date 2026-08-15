@@ -257,6 +257,62 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return worst
 
 
+def cmd_screen(args: argparse.Namespace) -> int:
+    import subprocess
+
+    from zoo import funnel as fmod
+    from zoo import recipe as recmod
+    from zoo.config import ROOT, load_policy
+    from zoo.graph import ops as omod
+    from zoo.store.events import EventLog
+    from zoo.store.schema import Status
+
+    tc = load_toolchain()
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001
+        commit = ""
+
+    ctx = fmod.Context(
+        toolchain=tc,
+        table=omod.load(tc),
+        policy=load_policy(),
+        log=EventLog(),
+        zoo_commit=commit,
+    )
+
+    recipes = recmod.discover(ROOT / "models")
+    if args.only:
+        wanted = set(args.only)
+        recipes = [r for r in recipes if r.id in wanted]
+        if not recipes:
+            print(f"  no recipe matching {sorted(wanted)}", file=sys.stderr)
+            return 2
+
+    print(f"\nscreening {len(recipes)} recipe(s) — run {ctx.run_id}\n")
+    failed = 0
+    for rec in recipes:
+        for graph in rec.graphs:
+            events = fmod.screen_graph(rec, graph, ctx, unlocked=args.unlocked)
+            last = events[-1] if events else None
+            reached = last.stage if last else "—"
+            ok = last is not None and last.status == Status.PASS
+            mark = "✓" if ok else ("⚪" if last and last.status == Status.SKIP else "✗")
+            print(f"  {mark} {rec.id}/{graph.id:<24} reached {reached}")
+            for ev in events:
+                if ev.status != Status.PASS and ev.error:
+                    print(f"        [{ev.stage}] {ev.failure_class or ''} {ev.error[:150]}")
+            if not ok and (not last or last.status != Status.SKIP):
+                failed += 1
+
+    print(f"\n  {len(ctx.log.read_all())} events in {EventLog().path.relative_to(ROOT)}")
+    print("  run `zoo report` to fold them into RESULTS.md\n")
+    return 1 if failed else 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     from zoo.config import ROOT
     from zoo.store import report as rmod
@@ -336,6 +392,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="assume the transformer profile's recognition passes are on")
     p_lint.add_argument("-v", "--verbose", action="store_true", help="show info-level notes")
     p_lint.set_defaults(func=cmd_lint)
+
+    p_screen = sub.add_parser(
+        "screen", help="run every recipe through the board-free funnel"
+    )
+    p_screen.add_argument("--only", nargs="*", help="restrict to these recipe ids")
+    p_screen.add_argument("--unlocked", action="store_true",
+                          help="assume the transformer profile's recognition passes")
+    p_screen.set_defaults(func=cmd_screen)
 
     p_report = sub.add_parser("report", help="fold the event log into RESULTS.md")
     p_report.add_argument(

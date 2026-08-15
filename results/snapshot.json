@@ -1,6 +1,283 @@
 {
- "graphs": [],
+ "graphs": [
+  {
+   "best": {
+    "blocked_by": "",
+    "deepest_stage": "budget",
+    "failure_class": "",
+    "graph_id": "model",
+    "is_infra_last": false,
+    "metrics": {
+     "applied": [
+      "downgrade_ir"
+     ],
+     "bytes": 14002696,
+     "changed": 102,
+     "dynamic_conditional": 0,
+     "errors": 0,
+     "folded_constants": [],
+     "hf_revision": "main",
+     "io_bytes": 606116,
+     "ir_version": 9,
+     "is_quantised": false,
+     "macs": 300496273,
+     "max_rank": 4,
+     "max_tensor_dim": 1280,
+     "nodes": 100,
+     "ops_frontend_only": 0,
+     "ops_npu": 100,
+     "ops_sw": 0,
+     "ops_sw_unlocked": 0,
+     "ops_unsupported": 0,
+     "opset": 11,
+     "parity_unverified": [],
+     "peak_activation_fused": 9633792,
+     "peak_activation_raw": 9633792,
+     "pinned": {
+      "batch_size": 1
+     },
+     "placement": "activations-in-psram",
+     "pre_patch_violations": [
+      {
+       "message": "IR version 9 exceeds 8",
+       "rule": "ir_version",
+       "severity": "error"
+      }
+     ],
+     "quantised_weight_bytes": 13956668,
+     "rejected": [],
+     "requested": [
+      "downgrade_ir"
+     ],
+     "subgraph_nodes": 0,
+     "suggested_patches": [],
+     "unresolved_tensors": 0,
+     "violations": [],
+     "warnings": 0,
+     "weight_bytes": 13956668,
+     "weight_bytes_raw": 13956668
+    },
+    "model_id": "mobilenet_v2_1.0_224",
+    "signature": "",
+    "ts": "2026-08-15T11:45:04Z",
+    "variant_id": "",
+    "verdict": "SCREENED"
+   },
+   "graph_id": "model",
+   "infra_events": 0,
+   "model_id": "mobilenet_v2_1.0_224",
+   "variants": {
+    "": {
+     "blocked_by": "",
+     "deepest_stage": "budget",
+     "failure_class": "",
+     "graph_id": "model",
+     "is_infra_last": false,
+     "metrics": {
+      "applied": [
+       "downgrade_ir"
+      ],
+      "bytes": 14002696,
+      "changed": 102,
+      "dynamic_conditional": 0,
+      "errors": 0,
+      "folded_constants": [],
+      "hf_revision": "main",
+      "io_bytes": 606116,
+      "ir_version": 9,
+      "is_quantised": false,
+      "macs": 300496273,
+      "max_rank": 4,
+      "max_tensor_dim": 1280,
+      "nodes": 100,
+      "ops_frontend_only": 0,
+      "ops_npu": 100,
+      "ops_sw": 0,
+      "ops_sw_unlocked": 0,
+      "ops_unsupported": 0,
+      "opset": 11,
+      "parity_unverified": [],
+      "peak_activation_fused": 9633792,
+      "peak_activation_raw": 9633792,
+      "pinned": {
+       "batch_size": 1
+      },
+      "placement": "activations-in-psram",
+      "pre_patch_violations": [
+       {
+        "message": "IR version 9 exceeds 8",
+        "rule": "ir_version",
+        "severity": "error"
+       }
+      ],
+      "quantised_weight_bytes": 13956668,
+      "rejected": [],
+      "requested": [
+       "downgrade_ir"
+      ],
+      "subgraph_nodes": 0,
+      "suggested_patches": [],
+      "unresolved_tensors": 0,
+      "violations": [],
+      "warnings": 0,
+      "weight_bytes": 13956668,
+      "weight_bytes_raw": 13956668
+     },
+     "model_id": "mobilenet_v2_1.0_224",
+     "signature": "",
+     "ts": "2026-08-15T11:45:04Z",
+     "variant_id": "",
+     "verdict": "SCREENED"
+    }
+   },
+   "verdict": "SCREENED"
+  },
+  {
+   "best": {
+    "blocked_by": "lint",
+    "deepest_stage": "patch",
+    "failure_class": "OP_CONTROL_FLOW",
+    "graph_id": "model",
+    "is_infra_last": false,
+    "metrics": {
+     "applied": [
+      "downgrade_ir"
+     ],
+     "bytes": 2243022,
+     "changed": 1,
+     "folded_constants": [
+      "sr"
+     ],
+     "hf_revision": "main",
+     "ir_version": 10,
+     "max_rank": 3,
+     "max_tensor_dim": 128,
+     "nodes": 4,
+     "opset": 16,
+     "parity_unverified": [
+      "downgrade_ir"
+     ],
+     "pinned": {},
+     "pre_patch_violations": [
+      {
+       "message": "opset 16 is above the 13 both prior projects pinned to",
+       "rule": "opset",
+       "severity": "warn"
+      },
+      {
+       "message": "IR version 10 exceeds 8",
+       "rule": "ir_version",
+       "severity": "error"
+      },
+      {
+       "message": "control flow at the top level: {'If': 1} hiding 156 nodes in subgraphs",
+       "rule": "control_flow",
+       "severity": "error"
+      },
+      {
+       "message": "dynamic axes with no name: ['input[0]', 'input[1]', 'state[1]']",
+       "rule": "anonymous_dims",
+       "severity": "error"
+      }
+     ],
+     "rejected": [],
+     "requested": [
+      "downgrade_ir",
+      "pin_anonymous_axes"
+     ],
+     "subgraph_nodes": 156,
+     "weight_bytes_raw": 8
+    },
+    "model_id": "silero-vad",
+    "signature": "e23bbb8412c8",
+    "ts": "2026-08-15T11:45:05Z",
+    "variant_id": "",
+    "verdict": "REJECTED"
+   },
+   "graph_id": "model",
+   "infra_events": 0,
+   "model_id": "silero-vad",
+   "variants": {
+    "": {
+     "blocked_by": "lint",
+     "deepest_stage": "patch",
+     "failure_class": "OP_CONTROL_FLOW",
+     "graph_id": "model",
+     "is_infra_last": false,
+     "metrics": {
+      "applied": [
+       "downgrade_ir"
+      ],
+      "bytes": 2243022,
+      "changed": 1,
+      "folded_constants": [
+       "sr"
+      ],
+      "hf_revision": "main",
+      "ir_version": 10,
+      "max_rank": 3,
+      "max_tensor_dim": 128,
+      "nodes": 4,
+      "opset": 16,
+      "parity_unverified": [
+       "downgrade_ir"
+      ],
+      "pinned": {},
+      "pre_patch_violations": [
+       {
+        "message": "opset 16 is above the 13 both prior projects pinned to",
+        "rule": "opset",
+        "severity": "warn"
+       },
+       {
+        "message": "IR version 10 exceeds 8",
+        "rule": "ir_version",
+        "severity": "error"
+       },
+       {
+        "message": "control flow at the top level: {'If': 1} hiding 156 nodes in subgraphs",
+        "rule": "control_flow",
+        "severity": "error"
+       },
+       {
+        "message": "dynamic axes with no name: ['input[0]', 'input[1]', 'state[1]']",
+        "rule": "anonymous_dims",
+        "severity": "error"
+       }
+      ],
+      "rejected": [],
+      "requested": [
+       "downgrade_ir",
+       "pin_anonymous_axes"
+      ],
+      "subgraph_nodes": 156,
+      "weight_bytes_raw": 8
+     },
+     "model_id": "silero-vad",
+     "signature": "e23bbb8412c8",
+     "ts": "2026-08-15T11:45:05Z",
+     "variant_id": "",
+     "verdict": "REJECTED"
+    }
+   },
+   "verdict": "REJECTED"
+  }
+ ],
  "infra_events": 0,
- "signatures": {},
- "total_events": 0
+ "signatures": {
+  "e23bbb8412c8": {
+   "count": 1,
+   "example_error": "[control_flow] control flow at the top level: {'If': 1} hiding 156 nodes in subgraphs; [anonymous_dims] dynamic axes with no name: ['input[0]', 'input[1]', 'state[1]']",
+   "failure_class": "OP_CONTROL_FLOW",
+   "known_issue": "",
+   "models": [
+    "silero-vad"
+   ],
+   "signature": "e23bbb8412c8",
+   "stages": [
+    "lint"
+   ]
+  }
+ },
+ "total_events": 11
 }

@@ -37,6 +37,22 @@ _VERDICT_MARK = {
 }
 
 
+def _pick(metrics: dict, *keys):
+    """First present key among several spellings.
+
+    Stages name the same quantity differently on purpose: the budget stage
+    reports its own estimate (`peak_activation_fused`), while the compile stage
+    reports what the compiler allocated (`activations_bytes`, straight out of
+    `network_c_info.json`). The leaderboard shows whichever is the strongest
+    evidence available, preferring measured over estimated.
+    """
+    for key in keys:
+        value = metrics.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def _kb(value) -> str:
     if value in (None, ""):
         return "—"
@@ -152,9 +168,11 @@ def render(snap: Snapshot, *, recipes: dict | None = None) -> str:
                     graph.graph_id,
                     task or "—",
                     _VERDICT_MARK.get(graph.verdict, graph.verdict),
-                    _kb(metrics.get("weights_bytes")),
-                    _kb(metrics.get("activations_bytes")),
-                    str(metrics.get("pool_placement") or "—"),
+                    # Compiler-reported first, analytic estimate as fallback.
+                    _kb(_pick(metrics, "weights_bytes", "quantised_weight_bytes",
+                              "weight_bytes")),
+                    _kb(_pick(metrics, "activations_bytes", "peak_activation_fused")),
+                    str(_pick(metrics, "pool_placement", "placement") or "—"),
                     _epochs(metrics),
                     _num(metrics.get("latency_ms_median")),
                     _num(metrics.get("rtf"), "{:.3f}"),

@@ -210,12 +210,31 @@ def fold_const_inputs(model: Any, values: dict[str, Any]) -> tuple[Any, PatchRes
 # ---------------------------------------------------------------------------
 
 
+def _simplifiable(model: Any) -> bool:
+    """The simplifier needs static shapes and straight-line control flow.
+
+    Given neither, it does not merely fail — it thrashes. Run against
+    `onnx-community/silero-vad`, whose graph has fifteen `If` nodes and three
+    anonymous dynamic axes, onnxsim tried to fold through every branch and
+    reported "Simplified model larger than 2GB. Trying to save as external
+    data..." before producing something unusable. Refusing up front is both
+    faster and quieter than discarding the result afterwards.
+    """
+    if any(node.op_type in ("If", "Loop", "Scan") for node in model.graph.node):
+        return False
+    for vi in model.graph.input:
+        for dim in vi.type.tensor_type.shape.dim:
+            if not (dim.HasField("dim_value") and dim.dim_value > 0):
+                return False
+    return True
+
+
 @register(
     "constant_fold",
     fixes="",
     summary="run the ONNX simplifier: fold Shape/Gather plumbing and constant subgraphs",
 )
-@applies_when(lambda m: True)
+@applies_when(_simplifiable)
 def constant_fold(model: Any) -> tuple[Any, PatchResult]:
     """Constant-fold and simplify.
 

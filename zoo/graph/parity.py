@@ -42,9 +42,36 @@ class Parity:
         return self.ok is not None
 
 
+_SILENCED = False
+
+
+def _silence_ort() -> None:
+    """Stop ONNX Runtime writing session-init failures straight to fd 2.
+
+    Failing to build a session is a normal, expected outcome here — a graph
+    with control flow or unpinned shapes cannot run, and `compare` reports
+    that as "unknown". ORT logs the failure from C++ before the exception
+    reaches Python, so `log_severity_level` on the session options is too late
+    and `contextlib.redirect_stderr` never sees it. Raising the default
+    severity is the only thing that actually quiets it, and it costs nothing:
+    every failure is still caught, described and returned.
+    """
+    global _SILENCED
+    if _SILENCED:
+        return
+    import onnxruntime as ort
+
+    try:
+        ort.set_default_logger_severity(4)  # fatal only
+    except Exception:  # noqa: BLE001 - older builds may not expose it
+        pass
+    _SILENCED = True
+
+
 def _session(model_bytes: bytes):  # noqa: ANN202
     import onnxruntime as ort
 
+    _silence_ort()
     options = ort.SessionOptions()
     options.log_severity_level = 3
     # Single-threaded on purpose. Int8 graphs with max-pool ties route
