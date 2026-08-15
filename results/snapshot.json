@@ -700,7 +700,7 @@
   {
    "best": {
     "blocked_by": "",
-    "deepest_stage": "generate",
+    "deepest_stage": "board",
     "failure_class": "",
     "graph_id": "model",
     "is_infra_last": false,
@@ -722,7 +722,10 @@
        "profile": "extflash"
       }
      ],
+     "latency_ms": 22.056,
+     "latency_ms_median": 22.056,
      "macc_total": 356062521,
+     "ontarget_cos": 0.998691,
      "pool_placement": "weights-in-flash",
      "pools": {
       "cpuRAM2": 1048576,
@@ -733,15 +736,16 @@
       "octoFlash": 3946529
      },
      "predicted_ms": 31.146776000000003,
+     "predicted_vs_measured": 0.7081310759097507,
      "profile_used": "extflash",
      "sw_epoch_ops": {},
      "weights_bytes": 3946529
     },
     "model_id": "mobilenet_v2_1.0_224",
     "signature": "",
-    "ts": "2026-08-15T12:15:03Z",
+    "ts": "2026-08-15T12:26:25Z",
     "variant_id": "extflash/int8/in-f32/npu",
-    "verdict": "COMPILES"
+    "verdict": "MEASURED"
    },
    "graph_id": "model",
    "infra_events": 1,
@@ -821,13 +825,13 @@
      },
      "model_id": "mobilenet_v2_1.0_224",
      "signature": "",
-     "ts": "2026-08-15T12:14:42Z",
+     "ts": "2026-08-15T12:23:21Z",
      "variant_id": "",
      "verdict": "QUANTIZES"
     },
     "extflash/int8/in-f32/npu": {
      "blocked_by": "",
-     "deepest_stage": "generate",
+     "deepest_stage": "board",
      "failure_class": "",
      "graph_id": "model",
      "is_infra_last": false,
@@ -849,7 +853,10 @@
         "profile": "extflash"
        }
       ],
+      "latency_ms": 22.056,
+      "latency_ms_median": 22.056,
       "macc_total": 356062521,
+      "ontarget_cos": 0.998691,
       "pool_placement": "weights-in-flash",
       "pools": {
        "cpuRAM2": 1048576,
@@ -860,18 +867,19 @@
        "octoFlash": 3946529
       },
       "predicted_ms": 31.146776000000003,
+      "predicted_vs_measured": 0.7081310759097507,
       "profile_used": "extflash",
       "sw_epoch_ops": {},
       "weights_bytes": 3946529
      },
      "model_id": "mobilenet_v2_1.0_224",
      "signature": "",
-     "ts": "2026-08-15T12:15:03Z",
+     "ts": "2026-08-15T12:26:25Z",
      "variant_id": "extflash/int8/in-f32/npu",
-     "verdict": "COMPILES"
+     "verdict": "MEASURED"
     }
    },
-   "verdict": "COMPILES"
+   "verdict": "MEASURED"
   },
   {
    "best": {
@@ -1020,5 +1028,5 @@
    ]
   }
  },
- "total_events": 50
+ "total_events": 53
 }

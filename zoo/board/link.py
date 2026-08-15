@@ -91,6 +91,43 @@ def holders(port: Path) -> list[str]:
     return [ln for ln in proc.stdout.splitlines() if ln.strip()]
 
 
+#: A wedged probe. Confirmed on this bench: neither an SWD reset nor a usbipd
+#: detach/attach clears it — the device re-enumerates and still refuses. Only
+#: unplugging the USB cable does. So retrying is not merely useless, it burns
+#: minutes per attempt while looking like progress.
+WEDGED = "DEV_USB_COMM_ERR"
+
+
+def probe_responds(tc: Toolchain, *, timeout: float = 60.0) -> tuple[bool, str]:
+    """Can the programmer reach the target over SWD at all?"""
+    proc = subprocess.run(
+        [str(tc.programmer_cli), "-c", "port=SWD", "mode=HOTPLUG"],
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )
+    out = proc.stdout + proc.stderr
+    return (WEDGED not in out and proc.returncode == 0), out
+
+
+def assert_probe_healthy(tc: Toolchain) -> None:
+    """Fail fast, and tell the human the one thing that actually works.
+
+    Called before a load rather than after three failed attempts: a wedged
+    ST-LINK cannot be recovered in software, so the honest response is to stop
+    and say so.
+    """
+    ok, out = probe_responds(tc)
+    if ok:
+        return
+    if WEDGED in out:
+        raise BoardError(
+            f"ST-LINK is wedged ({WEDGED}). Neither an SWD reset nor a usbipd "
+            "detach/attach clears this — physically unplug and replug the USB "
+            "cable, then re-run. (Killing a runner mid-inference is the usual "
+            "cause.)"
+        )
+    raise BoardError(f"probe did not respond over SWD: {out.strip()[-300:]}")
+
+
 def preflight(tc: Toolchain) -> LinkState:
     """Everything that must be true before a measurement is attempted."""
     killed = kill_stale_gdbserver()
@@ -99,4 +136,5 @@ def preflight(tc: Toolchain) -> LinkState:
         state.detail = (state.detail + "; killed a stale gdbserver").strip("; ")
     if not state.port or not state.port.exists():
         raise BoardError(f"{tc.serial_port} not present after attach")
+    assert_probe_healthy(tc)
     return state

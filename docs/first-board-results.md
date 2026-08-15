@@ -9,7 +9,7 @@ STM32N6570-DK. int8 static QDQ, synthetic calibration.
 | handpose @224 | **10.15** | 0.9398 | on-chip | 53 (50/0) | 1,175 | 1,372 | 7.45 | ×1.4 |
 | pphumanseg @192 | **55.01** | 1.0000 | weights-in-flash | 96 (76/15) | 1,517 | 2,032 | 16.63 | ×3.3 |
 | yunet @640 | **161.61** | 0.9990 | activations-in-PSRAM | 53 (49/0) | 1,681 | 4,481 | 28.11 | ×5.7 |
-| mobilenet_v2 @224 | — | — | weights-in-flash | 56 (54/0) | 3,854 | 2,058 | — | loader failure (infra) |
+| mobilenet_v2 @224 | **22.06** | 0.9987 | weights-in-flash | 56 (54/0) | 3,854 | 2,058 | 31.15 | ×0.7 |
 
 ## The compiler agrees with ST, exactly
 
@@ -39,8 +39,16 @@ ratio is not noise — it is a **memory-boundedness indicator**, available befor
 the board is touched, and it orders the three placements exactly as the
 architecture says it should.
 
-mnist-12's ×5.2 is the exception that fits: at 0.106 ms the fixed per-inference
-overhead dominates, so the ratio says nothing about memory there.
+Two rows qualify that reading. mnist-12's ×5.2 is fixed per-inference overhead
+dominating a 0.106 ms measurement, so it says nothing about memory. And
+mobilenet_v2 comes in at **×0.7 — faster than predicted**, the only row below
+1.0. The prediction sums each epoch's critical path serially; the compiler
+pipelines across epochs, so a compute-dense convolutional net with 54 hardware
+epochs and nothing in software beats the serial estimate outright.
+
+So the ratio is better read as *pipelining versus memory stalls*: below 1 means
+the schedule overlapped more than the estimate assumed, well above 1 means the
+model is waiting on memory.
 
 ## The activation cliff, measured
 
@@ -67,12 +75,15 @@ calibrated on noise, and it should not be read as anything else.
 
 ## Open
 
-- **mobilenet_v2 fails to load** with no success marker, three attempts, after
-  compiling cleanly. Classified infra, so it has not become a model verdict.
-  Prime suspect is the RAM-resident image: the validation firmware links into
-  AXISRAM1 at 1024K and mobilenet's weights are 3.8 MB in external flash, so the
-  flash write may be the step that is failing. Worth checking against
-  `stm32n6_reloc.mpool` / `--relocatable`.
+- **mobilenet_v2's first attempt was a wedged probe, not a model problem.**
+  Three load attempts failed at `Flashing memory xSPI2 -- return code ERROR`;
+  running the programmer directly gave `ST-LINK error (DEV_USB_COMM_ERR)`. A
+  usbipd detach/attach re-enumerated the device and did *not* clear it,
+  confirming the catalogue's claim that only a physical replug does. It
+  recovered on its own shortly after and then measured 22.06 ms first try.
+  `preflight` now checks the probe over SWD before loading and fails with that
+  instruction, rather than burning three attempts on something no amount of
+  retrying fixes.
 - **15 software epochs in pphumanseg** — its `Resize` nodes, as lint predicted.
   Candidate for the `--expand-softmax`-style question: is there a rewrite that
   moves them to hardware?
