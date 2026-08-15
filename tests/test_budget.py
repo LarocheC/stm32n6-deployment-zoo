@@ -181,3 +181,25 @@ def test_positional_patch_makes_a_pinned_graph_loadable() -> None:
     )
     out = session.run(None, {"h": np.zeros((1, 250, 8), dtype=np.float32)})[0]
     assert out.shape == (1, 250, 8)
+
+
+def test_macs_are_not_silently_zero_on_a_quantised_graph() -> None:
+    """A Conv's weight arrives through DequantizeLinear in a QDQ graph, so a
+    lookup that only checks initializers finds nothing and reports zero MACs
+    for a model that plainly has convolutions."""
+    w = numpy_helper.from_array(np.ones((4, 3, 3, 3), dtype=np.int8), name="Wq")
+    scale = numpy_helper.from_array(np.float32(0.02), name="s")
+    zp = numpy_helper.from_array(np.int8(0), name="z")
+    graph = helper.make_graph(
+        [
+            helper.make_node("DequantizeLinear", ["Wq", "s", "z"], ["W"]),
+            helper.make_node("Conv", ["x", "W"], ["y"], kernel_shape=[3, 3], pads=[1, 1, 1, 1]),
+        ],
+        "qdq_conv",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 16, 16])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4, 16, 16])],
+        initializer=[w, scale, zp],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    assert bmod.macs(model) == 16 * 16 * 4 * 27

@@ -1,23 +1,2908 @@
-# Known STM32N6 toolchain failures, keyed by failure class.
+# Known STM32N6 toolchain failures.
 #
-# This file is the zoo's institutional memory. A failure that matches an entry
-# here is a known constraint with a known remedy; one that matches nothing is
-# the discovery queue — either a new constraint to document, or a bug in the
-# harness. Shrinking the unmatched set is the work.
+# GENERATED from a survey of ~/dnsmos_exported and ~/eco8-neaixt, then verified
+# entry by entry against the cited sources. 112 findings were extracted, all
+# 112 survived verification, and they merge into the 82 distinct constraints
+# below. Edit by hand freely — this is the zoo's institutional memory, not a
+# build artifact — but keep every entry's `sources`, because a remedy nobody
+# has actually run is a hypothesis.
 #
-# Every entry must cite a source. A remedy nobody has actually run is a
-# hypothesis, and belongs in `lab/` until it is not.
+# `error_signature` is matched (case-insensitively, as a substring) against
+# tool output by zoo.faults.signatures.classify, so these strings are live
+# code, not documentation. Getting one wrong makes a real failure unmatched.
 #
-# Fields:
-#   id             stable kebab-case slug
-#   failure_class  the FailureClass this entry explains (one entry per class)
-#   title          one line
-#   cause          why it happens
-#   workaround     what to do about it
-#   patch          graph-patch name, if a rewrite fixes it
-#   zoo_action     lint-rule | graph-patch | compile-postcondition |
-#                  board-invariant | infra-retry | document-only
-#   silent         true if the tool reports success and the result is wrong
-#   sources        absolute paths backing the claim
+# Ordered: lint rules first (a static screen can predict these), then graph
+# patches, compile post-conditions, board invariants, infra retries, and
+# finally the ones there is nothing to do about but know.
 
-# Populated by the catalogue mined from ~/dnsmos_exported and ~/eco8-neaixt.
+[[issue]]
+id            = "dynamic-matmul-software-epoch-fallback"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    MatMul maps to the NPU only when the second operand is constant; dynamic x
+    dynamic falls back to M55
+    """
+symptom       = """
+    Compilation succeeds and results are correct, but any MatMul whose second
+    operand is a runtime tensor (e.g. weights kept as graph inputs so the
+    optimizer can update them in RAM without reflashing) is emitted as an M55
+    software epoch - 27.7 MMAC each per window for the two head matmuls.
+    """
+cause         = """
+    ST's Neural-ART mapper only accelerates MatMul with a constant right-hand
+    operand.
+    """
+workaround    = """
+    Accept the SW cost, bake the operand as an initializer where updates are not
+    needed, or hand-write the matmul in C (CMSIS-DSP). Read
+    `network_generate_report.txt` for the HW/hybrid/SW epoch split before
+    writing runtime code. Lint predicate: MatMul whose input[1] is not an
+    initializer.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/README.md"]
+
+[[issue]]
+id            = "fp32-elementwise-tail-sets-activation-peak"
+failure_class = "QUANTIZATION_COVERAGE_GAP"
+stage         = "quantize"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: ORT quantizes only Conv/Gemm/MatMul, so the backward's elementwise
+    tail keeps the peak tensor in fp32
+    """
+symptom       = """
+    Quantization reports success and the model looks int8, but `Equal -> Cast ->
+    Sub -> Mul` are untouched by default and carry conv1's output tensor in fp32
+    at 4 B/element. Measured on the shipped artifacts every crop variant peaks
+    at 15.64 MB ([1,128,199,161]) - a 4x miss against the 3.91 MB analytic int8
+    figure, exactly the fp32:int8 byte ratio. At the full 9.01 s window the
+    single live activation is 70.75 MB (128 x 900 x 161 x 4 B), larger than the
+    DK's 32 MB PSRAM, so the graph cannot be deployed at all. Nothing warns.
+    """
+cause         = """
+    ORT's op_types_to_quantize / default QDQ op registration covers only
+    Conv/Gemm/MatMul, so the backward's relu_mask chain - materialized at
+    conv1's full size - stays fp32 while everything around it is int8. This is
+    NOT an ORT accounting artifact: those tensors sit outside any Q/DQ region,
+    so a QDQ-fusing backend materializes them as float too.
+    """
+workaround    = """
+    Quantize the peak-setting elementwise nodes (crop_study.py --elementwise /
+    quantize_elementwise=True) and/or shorten the window - the peak scales
+    linearly with frames (9.01 s 17.69 MB, 4 s 7.84 MB, 2 s 3.91 MB, 1 s 1.95
+    MB, 0.5 s 0.96 MB analytic int8). The memory win costs -0.057 MOS (paired,
+    [-0.095, -0.023]), so it is a trade. For the full-size model a compact
+    student (stride-2 first conv, 16 channels) is a REQUIREMENT, not an
+    optimization. A lint computes per-tensor fp32 bytes from the ONNX before any
+    ST tool runs. CROSS-CHECK: the resulting '1.95 MB fits n6-noextmem' claim
+    did NOT survive the real allocator - see
+    analytic-activation-peak-is-lower-bound.
+    """
+patch         = "quantize_elementwise_tail"
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/README.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/budget.py"]
+
+[[issue]]
+id            = "macs-silently-zero-on-qdq-graphs"
+failure_class = "MAC_ACCOUNTING_SILENTLY_ZERO"
+stage         = "lint"
+zoo_action    = "lint-rule"
+title         = """
+    A naive MAC counter reports zero for QDQ int8 graphs because weights arrive
+    through DequantizeLinear
+    """
+symptom       = """
+    MAC/compute accounting on an int8 QDQ artifact silently returns 0 (or a
+    large undercount) - every Conv/Gemm/MatMul whose weight arrives through
+    DequantizeLinear contributes nothing, and no error is raised. The resulting
+    latency extrapolation is meaningless.
+    """
+cause         = """
+    In QDQ format the weight input of a Conv/Gemm/MatMul is the output of a
+    DequantizeLinear, so it is not in graph.initializer; a lookup that only
+    checks initializers and value_info returns None and the node is skipped.
+    """
+workaround    = """
+    Reimplement macs() exactly (budget.py): infer_shapes; shapes over
+    input+output+value_info; inits as tuple(t.dims); producers map;
+    tensor_shape(name, hops=4) returns inits[name], else shapes[name], else
+    follows the producer if its op_type is in (DequantizeLinear, QuantizeLinear,
+    Transpose, Identity, Cast) via input[0], else None. Conv: add prod(out) *
+    w[1] * (prod(w[2:]) if len(w)>2 else 1) - w[1] is cin/groups so grouping is
+    already accounted. MatMul/Gemm: add prod(out) * a[-1]. Carry the caveats:
+    nodes with unresolvable shapes contribute 0 silently, and Gemm transA/transB
+    are not consulted.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/budget.py"]
+
+[[issue]]
+id            = "qdq-graph-charged-one-byte-per-element"
+failure_class = "MEMORY_ACCOUNTING_WRONG_DTYPE"
+stage         = "lint"
+zoo_action    = "lint-rule"
+title         = """
+    Charging 1 byte/element across a QDQ int8 graph understates the activation
+    peak fourfold
+    """
+symptom       = """
+    A memory model that assumes 'int8 graph => 1 byte per activation element'
+    reports a peak 4x too small and declares an on-chip fit the compiler will
+    not honour. The graph is nominally int8 while its largest tensors are fp32.
+    """
+cause         = """
+    A QDQ int8 graph still carries fp32 tensors wherever nodes were excluded
+    from quantization (frontend MatMuls, shared-weight MatMuls, the small
+    elementwise nodes held out to protect the gradient). Their value_info
+    elem_type is FLOAT and a fusing backend materializes them as float too,
+    because they sit outside any Q/DQ region.
+    """
+workaround    = """
+    Reimplement peak_activation exactly (budget.py): infer_shapes; build
+    inits/producers/consumers; passthrough = (DequantizeLinear, QuantizeLinear,
+    Cast, Transpose, Identity); is_weight(name) follows producers up to 4 hops
+    (no producer -> name in inits; non-passthrough producer -> False; hop
+    exhaustion -> False); candidates are value_info + output ONLY (graph.input
+    excluded); dims use dim_value>0 else 1, skipping empty/weight tensors; width
+    from {FLOAT:4, FLOAT16:2, DOUBLE:8, INT8/UINT8/BOOL:1, INT16/UINT16:2,
+    INT32/UINT32:4, INT64/UINT64:8} default 4; if fused_qdq and FLOAT and
+    in_quantized_region(name) then width=1, where in_quantized_region is True
+    iff the producer is a DequantizeLinear OR the tensor has >=1 consumer and
+    every consumer is a QuantizeLinear; nbytes = prod(dims)*width, keep argmax.
+    ALWAYS report both fused_qdq=False (what ORT CPU materializes) and
+    fused_qdq=True (what Neural-ART materializes), and never quote the fused
+    number as measured on target.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/budget.py"]
+
+[[issue]]
+id            = "quantization-starts-before-magnitude-compression"
+failure_class = "QUANTIZATION_BOUNDARY_MISPLACED"
+stage         = "quantize"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: quantizing the magnitude-compression prologue drags the raw |STFT|
+    input onto a coarse int8 grid
+    """
+symptom       = """
+    Quantization succeeds and the int8 graph runs, but the raw magnitude input -
+    60+ dB of dynamic range - is represented on a 256-level per-tensor grid
+    before compression, discarding exactly the low-energy detail compression
+    exists to preserve. Nothing in the tool reports it. (The quality consequence
+    is documented as a mechanism, not quantified.)
+    """
+cause         = """
+    ORT's QDQ quantizer treats the eps-Add of the (|stft|+eps)**0.3 compression
+    as a quantizable op, so it inserts Q/DQ on the raw-magnitude graph input
+    path ahead of the first Conv. int8 has to START on the compressed features,
+    at the frontend Conv.
+    """
+workaround    = """
+    Walk the PREPROCESSED graph from the first non-state graph input forward,
+    collecting every node on the path up to (but not including) the first Conv -
+    Add(+eps) -> Pow -> Unsqueeze for a mag_compressed export, just Unsqueeze
+    for a plain 'mag' export - and pass those names to quantize_static's
+    nodes_to_exclude (convfsenet.quant._compression_prologue_nodes). Lint: a
+    QuantizeLinear on the path between a magnitude graph input and the first
+    Conv.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/convfsenet/quant.py"]
+
+[[issue]]
+id            = "software-epoch-op-tier"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "lint"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: legal-but-software-epoch ops compile and run correctly while costing
+    an NPU teardown per occurrence
+    """
+symptom       = """
+    A graph using ReduceSum, Greater, GreaterOrEqual, Less, LessOrEqual, Log,
+    Gather, Tile or Resize compiles cleanly and produces correct results, but
+    each such op is mapped to a Cortex-M55 software epoch (or forces a float
+    fallback), costing an NPU pipeline teardown, a memory round-trip and cache
+    maintenance. Nothing flags it: STM32N6_ALLOWED_OPS accepts these because
+    they ARE in ST's mapping table, just slowly - so a regression that
+    reintroduces an un-substituted form is invisible at compile time.
+    """
+cause         = """
+    ST maps this op tier to software rather than to the Neural-ART accelerator.
+    (The cost breakdown is asserted by the source comment, not measured there.)
+    """
+workaround    = """
+    Hand-substitute with HW-mapped equivalents - documented: ReduceSum ->
+    ReduceMean*N, tensor-Div -> Reciprocal*Mul, Greater -> Equal - and lint
+    against the stricter DNSMOS_DEVICE_OPS (= STM32N6_ALLOWED_OPS minus
+    {ConvTranspose, Div, Greater, GreaterOrEqual, Less, LessOrEqual, ReduceSum,
+    Resize, Gather, Tile}) rather than the permissive set, so the substitution
+    cannot regress unnoticed. Report software_epoch_ops() as a separate warning
+    tier for graphs that legitimately keep them.
+    """
+patch         = "substitute_software_epoch_ops"
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
+
+[[issue]]
+id            = "spectral-norm-power-iteration-traced-into-graph"
+failure_class = "EXPORT_ARTIFACT_BLOAT"
+stage         = "fetch"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: spectral_norm's power iteration is exported into the graph,
+    inflating the int8 model 4.7x
+    """
+symptom       = """
+    Export succeeds and the model is numerically usable, but 12 stray `MatMul` +
+    6 `Div` of pure normalization arithmetic are traced into the ONNX; the
+    compiled int8 model is 940 kB instead of 200 kB. `.eval()` does not suppress
+    it and `remove_parametrizations` does not see it.
+    """
+cause         = """
+    `torch.nn.utils.spectral_norm` uses the old hook API, so the power iteration
+    is live at export time and gets traced. This is a PyTorch export-time
+    property of the model, not a board or host problem (the source finding's
+    is_infra=true was wrong).
+    """
+workaround    = """
+    Call the legacy `remove_spectral_norm` before export - it folds the
+    normalization once and the 18 stray ops disappear (940 kB -> 200 kB int8;
+    torch-vs-ONNX parity 1.8e-07 after folding). Lint: 12-MatMul/6-Div
+    normalization pattern is visible in the exported ONNX.
+    """
+patch         = "fold_spectral_norm_power_iteration"
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "stale-exclusion-names-after-quant-pre-process"
+failure_class = "STALE_NODE_NAMES_IN_EXCLUSION_LIST"
+stage         = "quantize"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: node names read from the un-preprocessed graph exclude nothing,
+    because quant_pre_process renames every node
+    """
+symptom       = """
+    quantize_static runs cleanly and emits an int8 graph, but nodes_to_exclude
+    has no effect: the frontend / backward-tail nodes that were supposed to stay
+    float are quantized anyway. ORT does not warn about exclusion names matching
+    no node, so the only symptom is degraded numerics downstream.
+    """
+cause         = """
+    quant_pre_process (ORT's shape-inference + optimizer prepass) rewrites and
+    renames graph nodes. Any exclusion list gathered by walking the ORIGINAL
+    fp32 graph therefore contains names that no longer exist in the graph handed
+    to quantize_static.
+    """
+workaround    = """
+    Always compute exclusion lists from the PREPROCESSED graph.
+    export.quantize_qdq computes list_matmul_frontend_nodes /
+    list_shared_weight_matmuls against pre_path and takes a `preprocessed=True`
+    flag so callers that already ran quant_pre_process pass the preprocessed
+    file in; eco8's convfsenet/quant.py states the same rule. Harness guard
+    (pure ONNX name resolution, no ST tool needed): assert every name in
+    nodes_to_exclude resolves against the preprocessed graph before calling
+    quantize_static.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/export.py", "/home/claroche/eco8-neaixt/convfsenet/quant.py"]
+
+[[issue]]
+id            = "validate-random-feeds-on-stateful-graph"
+failure_class = "MISLEADING_VALIDATION_METRIC"
+stage         = "validate"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: stedgeai validate feeds random data into recurrent state inputs,
+    producing a meaninglessly low cosine
+    """
+symptom       = """
+    The per-frame streaming trunk (9 state tensors as graph I/O) validates at
+    X-cross cosine 0.843 - a number that reads as a fidelity failure - while the
+    same graph matches at 0.998 under realistic threaded states. No error is
+    raised; the metric is simply not measuring what it appears to.
+    """
+cause         = """
+    `validate` synthesises random inputs for every graph input, including FIFO
+    state tensors, which places them far outside any calibrated distribution.
+    """
+workaround    = """
+    For stateful graphs, do not accept validate's random-input cosine as a
+    fidelity verdict; measure with host-threaded realistic states (per-frame
+    state propagation, as in eco8's ConvFSENetCalibrationReader) and quote that
+    number. The lint must be phrased as the RISK CONDITION - 'graph declares
+    recurrent state tensors as inputs => validate's random-input cosine is not a
+    fidelity verdict' - which is statically visible; the 0.843 number itself
+    only exists after a validate run.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "batch-dim-not-one"
+failure_class = "BATCH_DIM_NOT_ONE"
+stage         = "lint"
+zoo_action    = "lint-rule"
+title         = """
+    Batch dimension != 1 on a batched graph input/output (lint rule: batch 1 on
+    batched I/O)
+    """
+error_signature = "{vi.name}: batch {d0.dim_value} != 1"
+symptom       = """
+    For every I/O tensor of rank > 1, dims[0] is flagged when it is a concrete
+    value other than 0 or 1 (symbolic dim0 is deferred to the non-static-shape
+    rule). The device runs batch 1.
+    """
+cause         = """
+    The N6 deployment path is single-sample; batched host artifacts must be
+    re-exported per-sample.
+    """
+workaround    = """
+    Export the device artifact with batch 1 (rows layout [1, n_rows, hop]).
+    IMPORTANT lint caveat: the `batched_io` parameter names which tensors are
+    actually batched, and the default (None) applies the rule to EVERY rank>1
+    I/O - right for activation-only graphs, wrong for graphs that take weight
+    matrices as runtime inputs, where it produces false positives. Pass
+    batched_io={...} listing only the genuinely batched tensors.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py"]
+
+[[issue]]
+id            = "non-static-io-shape"
+failure_class = "NON_STATIC_IO_SHAPE"
+stage         = "lint"
+zoo_action    = "lint-rule"
+title         = """
+    Dynamic/symbolic dimension on a graph input or output (lint rule: static I/O
+    shapes)
+    """
+error_signature = "{vi.name}: non-static dim (axis {axis})"
+symptom       = """
+    check_device_constraints flags any graph input or output dim that is
+    symbolic (dim_param set) or non-positive (dim_value <= 0). Interior tensors
+    are exempt from this rule - a symbolic interior dim is silently skipped.
+    """
+cause         = "ST Edge AI Core needs fully static I/O to allocate buffers at generate time."
+workaround    = """
+    Freeze the dynamic dims in the ONNX before compiling, or pass
+    --fix-parametric-shapes \"{'B':1}\" to stedgeai generate and set
+    allow_dynamic_batch=True in the lint so the axis-0 symbol is not reported.
+    """
+patch         = "freeze_dynamic_io_dims"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py"]
+
+[[issue]]
+id            = "op-outside-supported-vocabulary"
+failure_class = "OP_OUTSIDE_SUPPORTED_VOCABULARY"
+stage         = "lint"
+zoo_action    = "lint-rule"
+title         = """
+    Op absent from the ST Neural-ART operator-mapping table (lint rule: op
+    vocabulary)
+    """
+error_signature = "ops outside STM32N6 vocabulary: {sorted(extra)}"
+symptom       = """
+    check_device_constraints calls check_op_vocabulary and reports the sorted
+    set of op_types in the graph that are not in the allowed set (default
+    STM32N6_ALLOWED_OPS, or a stricter per-project set). Named examples outside
+    the table: Where, Expand, Scatter*, TopK, LayerNormalization.
+    """
+cause         = """
+    STM32N6_ALLOWED_OPS enumerates ops present in ST's operator-mapping table
+    with an HW, hybrid, or documented SW_INT/SW_FLOAT Cortex-M55 fallback.
+    Anything absent has no mapping - it is either un-importable by ST Edge AI
+    Core or of undocumented behaviour on the N6.
+    """
+workaround    = """
+    Rewrite the graph to the supported vocabulary before compiling
+    (DnsmosLossGraph(mode='device') does exactly that), or accept a hand-written
+    C kernel. The allowed set is a data table, so a general lint must carry one
+    table PER ST Edge AI version - and must be pruned from observed compiler
+    acceptance, since it currently produces false positives (see
+    lint-false-positive-vs-compiler).
+    """
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py"]
+
+[[issue]]
+id            = "opset-above-cap"
+failure_class = "OPSET_TOO_HIGH"
+stage         = "lint"
+zoo_action    = "lint-rule"
+title         = "Opset above the accepted cap (lint rule: opset <= max_opset)"
+error_signature = "opset {opset} > {max_opset}"
+symptom       = """
+    check_device_constraints reports a violation when the default ('')
+    opset_import version exceeds max_opset. ST's hard cap is 20; this repo pins
+    DNSMOS device exports to ST's recommended 13 and the eco8-neaixt convention
+    is 17, so anything above the pinned value is a device-artifact defect
+    flagged before any ST tool runs.
+    """
+cause         = """
+    ST Edge AI Core 4.0.1 supports up to opset 20 and behaves best at its
+    recommended level; higher-opset exports (and the op forms they introduce,
+    e.g. the dynamo/opset-20 shape subgraphs) are outside the validated
+    envelope.
+    """
+workaround    = """
+    Re-export at the pinned opset (rows-layout torchscript at opset 13 here) or
+    run the ONNX version converter down to it; pass max_opset explicitly per
+    project convention.
+    """
+patch         = "downgrade_opset"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py"]
+
+[[issue]]
+id            = "ort-qlinearmatmul-rejects-per-channel-zero-point"
+failure_class = "HOST_KERNEL_LIMITATION"
+stage         = "validate"
+zoo_action    = "lint-rule"
+title         = """
+    INFRA: ORT CPU fuses DQ+DQ+MatMul into QLinearMatMul at session load and
+    rejects the per-channel weight zero-point
+    """
+symptom       = """
+    Once both of a MatMul's inputs are quantized, the host reference session
+    fails at load time (or the MatMul cannot be placed), even though the
+    exported graph is valid ONNX and compiles for the target. The verbatim ORT
+    message is not recorded in the source. Easy to misattribute to the exporter
+    or to the ST toolchain.
+    """
+cause         = """
+    An ORT CPU kernel limitation on QLinearMatMul with per-channel weight
+    zero-points, triggered by session-load fusion. The source is explicit: 'an
+    ORT CPU kernel limit, not a defect in the exported graph' - a HOST-runtime
+    limitation that does not affect the target compile, which is why it is
+    classified infra here even though the remedy lives in the export.
+    """
+workaround    = """
+    Use per-node exclusion (nodes_to_exclude) so a MatMul never has both inputs
+    quantized simultaneously - this is why the shipped artifacts carry per-node
+    exclusion lists rather than a per-op-type policy. Do NOT record this as a
+    model or ST-toolchain verdict. Lint predicate: a MatMul whose two inputs are
+    both DequantizeLinear outputs and whose weight-side zero_point initializer
+    has rank > 0.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md"]
+
+[[issue]]
+id            = "quint8-activation-quantization-rejected"
+failure_class = "UNSUPPORTED_QUANT_DTYPE"
+stage         = "quantize"
+zoo_action    = "lint-rule"
+title         = "Neural-ART rejects unsigned QUInt8 activations; signed QInt8 is mandatory"
+error_signature = "quantized unsigned integer format is not supported"
+symptom       = """
+    A model quantized with onnxruntime's default unsigned QUInt8 activations is
+    rejected by stedgeai / Neural-ART. The same graph is perfectly valid for
+    host onnxruntime, which is why the host int8 study and the deploy artifact
+    use different recipes. Note the source states this as a requirement; no
+    reproduction log is recorded.
+    """
+cause         = """
+    onnxruntime's quantize_static defaults to QUInt8 activations. The NPU deploy
+    recipe requires QuantType.QInt8 activations with extra_options
+    {'ActivationSymmetric': False, 'WeightSymmetric': True}.
+    """
+workaround    = """
+    Quantize with activation_type=QuantType.QInt8, weight_type=QuantType.QInt8,
+    extra_options={'ActivationSymmetric': False, 'WeightSymmetric': True} (the
+    --signed path in lisennet/quant_onnx.py, matching convfsenet/quant.py).
+    per_channel=True is used on the windowed and streaming deploy branches but
+    NOT on the plain --signed path. Lint before compiling: read the elem_type of
+    the zero_point initializer on activation QuantizeLinear nodes and reject
+    UINT8.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/lisennet/quant_onnx.py"]
+
+[[issue]]
+id            = "shared-initializer-matmul-per-channel-crash"
+failure_class = "PER_CHANNEL_BIAS_SCALE_MISMATCH"
+stage         = "quantize"
+zoo_action    = "lint-rule"
+title         = """
+    Per-channel quantization crashes when the dynamo exporter dedupes one weight
+    initializer across a Gemm/Conv and a backward MatMul
+    """
+symptom       = """
+    quantize_static raises during per-channel weight/int32-bias handling: the
+    number of per-channel scales derived for the shared initializer does not
+    match the bias length of one of its consumers. The interpreter traceback
+    text is not recorded in the source.
+    """
+cause         = """
+    The dynamo exporter deduplicates identical initializers, so a loss graph's
+    backward MatMul (g @ W) reuses the forward Gemm's weight tensor. ORT's
+    per-channel quantizer assigns those two consumers different channel axes for
+    the same tensor, and its int32-bias scale adjustment then crashes on the
+    mismatch.
+    """
+workaround    = """
+    Before quantizing, scan the fp32 graph for tensors appearing in input[1:] of
+    more than one op type and exclude the MatMul consumers by name:
+    list_shared_weight_matmuls() builds consumers[input] -> {op_type} over
+    node.input[1:], then names any MatMul with an input whose consumer set minus
+    {'MatMul'} is non-empty. Those MatMuls are tiny, so keeping them float costs
+    nothing. Feed the names to quantize_static's nodes_to_exclude - computed
+    against the PREPROCESSED graph (see
+    stale-exclusion-names-after-quant-pre-process). Fully predictable from the
+    fp32 ONNX alone.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/export.py"]
+
+[[issue]]
+id            = "tensor-dim-over-65535"
+failure_class = "TENSOR_DIM_OVER_65535"
+stage         = "lint"
+zoo_action    = "lint-rule"
+title         = """
+    Any tensor dimension >= 65536, interior tensors included (lint rule: dim <
+    65536)
+    """
+error_signature = "{vi.name}: dim {d.dim_value} >= 65536"
+symptom       = """
+    Shape inference flags EVERY value_info (graph inputs, outputs AND interior
+    tensors) with a dim_value >= 65536. The ST front end rejects oversized
+    interior dims exactly as it rejects oversized I/O dims, so checking only the
+    model's I/O is insufficient.
+    """
+cause         = """
+    16-bit dimension limit in the ST front end. It bites long-audio graphs in
+    particular (e.g. a flat [1, 144160] waveform input).
+    """
+workaround    = """
+    Reshape the offending tensor so no single axis reaches 65536 - the rows
+    layout [1, n_rows, hop] (144160 = 901*160) is this project's instance.
+    Requires shape inference over the whole graph, not just I/O inspection.
+    """
+patch         = "reshape_oversized_axis"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py"]
+
+[[issue]]
+id            = "bool-rooted-mask-chain-unquantizable"
+failure_class = "QUANTIZATION_STRUCTURALLY_UNREACHABLE"
+stage         = "quantize"
+zoo_action    = "graph-patch"
+title         = """
+    No quantizer setting can reach a mask chain rooted at Equal - bool has no
+    quantization grid
+    """
+symptom       = """
+    Registering more op types for quantization silently has no effect on the
+    backward's mask chain: 22.2 MB of fp32 traffic across 184 nodes remains, of
+    which ~75% does no arithmetic at all (Concat 5.64 MB, Equal 5.05 MB,
+    Reshape/Unsqueeze 5.54 MB) and only 3% (Reciprocal + Log, 0.65 MB) is
+    genuinely irreducible. Registering movement+pool ops compiles and lints
+    clean but only moves SW epochs 125 -> 119.
+    """
+cause         = """
+    ORT inserts QDQ only where a quantized tensor already flows. `Equal`
+    consumes DequantizeLinear outputs (float) and emits bool - a type with no
+    quantization grid - so everything downstream (Cast -> Sub -> Mul, plus the
+    Concat/Reshape interleave upsampling) is float-rooted and unreachable
+    regardless of registration.
+    """
+workaround    = """
+    Requires a graph rewrite, not a setting: make `Equal` compare the raw int8
+    tensors directly (integer equality is exact when both sides share a scale)
+    and emit an int8 0/1 mask so the chain stays int8 end to end. Even then
+    Log/Reciprocal keep a small int8<->float boundary, so this is a memory
+    optimization, not a reliable workaround for the underlying ST runtime
+    defect.
+    """
+patch         = "int8_equal_mask_rewrite"
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "qdq-split-consumers-break-equality-mask"
+failure_class = "QDQ_TENSOR_INSTANCE_SPLIT"
+stage         = "quantize"
+zoo_action    = "graph-patch"
+title         = """
+    SILENT: quantize_static rewires only some consumers to the DQ output, so
+    Equal() masks are never true and the gradient is zero
+    """
+symptom       = """
+    The quantized graph is checker-clean and runs, but every max-pool /
+    global-max gradient route through an Equal(x, max_up) mask evaluates
+    all-false, so the whole gradient is silently zero. No tool reports anything.
+    """
+cause         = """
+    quantize_static rewires *some* consumers of a quantized tensor to the
+    DequantizeLinear output and leaves others on the original float instance. An
+    equality mask then compares the float instance against a max taken over the
+    dequantized instance; the two differ by the quantization error, so the
+    comparison is never satisfied and the mask zeroes the gradient it was
+    supposed to route.
+    """
+workaround    = """
+    Run repair_mask_consistency over the QUANTIZED artifact (export.quantize_qdq
+    calls it unconditionally after quantize_static). For every Equal whose
+    input[1] is not an initializer, walk producers up through {MaxPool,
+    ReduceMax, Unsqueeze, Reshape, Concat, Pad, QuantizeLinear,
+    DequantizeLinear, Squeeze, Transpose} until a MaxPool/ReduceMax; if the
+    chain contains any Q/DQ node or its source differs from the Equal's first
+    input, clone the chain (dropping Q/DQ), re-root it at the exact tensor
+    instance input[0] reads, rewire every clone input matching the original
+    predecessor (Concat 'stack' repeats it), and repoint Equal.input[1].
+    Max-of-the-same-tensor is then exact by construction. Lint predicate: any
+    Equal whose two operands straddle a Q/DQ boundary - checkable on the
+    quantized ONNX, before compiling.
+    """
+patch         = "repair_mask_consistency"
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/export.py"]
+
+[[issue]]
+id            = "atonn-segfault-empty-pad-constant-value"
+failure_class = "COMPILER_SEGFAULT"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    atonn segfaults at codegen on Pad nodes with an empty optional
+    constant_value input
+    """
+error_signature = "signo=11"
+symptom       = """
+    The Neural-ART compiler crashes at codegen on the streaming (FIFO
+    ring-buffer) export. Five bisection rounds down to a 19-node repro; the only
+    single-delta flip that passes is removing the empty third input of Pad.
+    Needs the dual-branch context, so single-path and windowed graphs compile
+    and never expose it.
+    """
+cause         = """
+    `F.pad` exports as `Pad(data, pads, \"\")` - an empty optional
+    constant_value input - and atonn 4.0.1 segfaults on that node form inside
+    the encoder's dual-branch sub-band stage. `nn.ConstantPad2d` exports an
+    explicit value tensor and dodges it. The original diagnosis blamed the
+    17-tensor FIFO state I/O; state I/O is innocent.
+    """
+workaround    = """
+    Strip the empty optional input before compiling
+    (`_strip_empty_pad_value_inputs` in lisennet/export_onnx.py, applied
+    automatically inside export_streaming_fp32). Bit-exact - the default
+    constant_value is 0. Grep the generate log for `signo=11` / `E103`; they
+    must be absent.
+    """
+patch         = "strip_empty_pad_value_inputs"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md"]
+
+[[issue]]
+id            = "atonn-segfault-rank5-tensors"
+failure_class = "COMPILER_SEGFAULT"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    atonn segfaults at codegen on rank-5 tensors emitted by a sub-pixel
+    (view->permute->view) upsampler
+    """
+error_signature = "signo=11"
+symptom       = """
+    Neural-ART codegen segfaults on the conv variant; OE-graph inspection shows
+    6 rank-5 tensors shaped [1,3,15,1,16] produced by SPConvTranspose2d's
+    view->permute->view.
+    """
+cause         = """
+    The Neural-ART compiler cannot handle rank-5 tensors; the sub-pixel upsample
+    idiom creates them.
+    """
+workaround    = """
+    Use `upsample=\"convtranspose\"` so the decoder stays 4-D (also ~3x fewer
+    decoder MACC). Lint: flag any tensor of rank > 4 after ONNX shape inference.
+    """
+patch         = "replace_subpixel_upsample_with_convtranspose"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md"]
+
+[[issue]]
+id            = "clip-bounds-through-dequantizelinear"
+failure_class = "FRONTEND_INTERNAL_ERROR"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    Clip min/max arriving through DequantizeLinear (ORT quantizer rewiring)
+    crashes the front end
+    """
+error_signature = "INTERNAL ERROR: None has type NoneType, but expected one of: bytes, unicode"
+symptom       = """
+    After onnxruntime QDQ quantization, `Clip` nodes whose min/max come from a
+    shared scalar constant rewired through `DequantizeLinear` abort the front
+    end. Purely a consequence of quantization - the fp32 graph had plain
+    constant Clip bounds - and the pattern is generated by the standard
+    quantization flow, not by hand-written graph surgery.
+    """
+cause         = """
+    ORT's quantizer dedups shared scalar constants by routing them through
+    DequantizeLinear; ST requires Clip bounds to be plain constant initializers
+    and dereferences a null when the producer is a node.
+    """
+workaround    = """
+    fix_clip_dq(model): for every Clip, for input index 1 (min) and 2 (max), if
+    the producer is a DequantizeLinear whose x/scale/zero_point are all
+    initializers, compute val = np.float32((x - zp) * scale) with zp defaulting
+    to 0.0 for 2-input DQs, create-or-reuse a scalar fp32 initializer keyed by
+    value and named f'clip_const_{float(val)}', and rebind. Key-by-value dedup
+    means N Clips sharing a bound share one initializer. Implemented as patch 4
+    in patch_for_stedgeai.py. Caveat: the now-unused DequantizeLinear is NOT
+    removed - add DCE and drop its orphaned initializers.
+    """
+patch         = "fold_clip_bounds_to_initializers"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
+
+[[issue]]
+id            = "convtranspose-outside-device-vocabulary"
+failure_class = "UNSUPPORTED_OP"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    ConvTranspose is treated as outside the device op vocabulary; the
+    zero-insertion replacement costs on-chip fit
+    """
+symptom       = """
+    Conv input-gradients cannot be expressed with `ConvTranspose`; hand-writing
+    stride-2 input-grads as zero-insertion upsampling + Conv works but
+    materializes a 1.0 MB intermediate, so the PESQ backward (169 epochs, 2.70
+    MB weights, 3.49 MB activations) no longer fits `n6-noextmem` and needs
+    `n6-allmems-O3`.
+    """
+cause         = """
+    Asserted to be absent from the STM32N6 target's supported operator set.
+    CAVEAT: the source records no compile attempt, no error message and no
+    report for this claim - and the same repo's lint wrongly rejected
+    InstanceNormalization, which the compiler accepted. Treat the causal half as
+    the author's assumption; the memory consequence is well measured.
+    """
+workaround    = """
+    Express transposed convolution as zero-insertion upsampling followed by an
+    ordinary Conv, and budget for the extra intermediate (or move to an allmems
+    profile). Before rewriting, attempt the compile - a lint rejection is not a
+    verdict.
+    """
+patch         = "zero_insertion_upsample_conv"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "dynamo-exporter-shape-subgraph-artifacts"
+failure_class = "UNSUPPORTED_DYNAMIC_SHAPE_SUBGRAPH"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    torch.export/dynamo artifacts (allowzero Reshapes, Shape subgraphs, Expand)
+    are not importable
+    """
+symptom       = """
+    Flat/opset-20 graphs produced by the dynamo exporter fail to compile because
+    of `allowzero=1` Reshapes whose shape input comes from a Shape subgraph, and
+    `Shape(end=...)`/`Expand` pairs emitted for `ones_like`. No compiler message
+    is recorded for this class in any reviewed source, so error_signature is
+    empty - but the failure is a loud compile-time rejection, not a silent one.
+    """
+cause         = """
+    The dynamo exporter emits runtime shape plumbing the ST front end cannot
+    constant-fold. This is a property of the EXPORTER choice, not of the model:
+    the torchscript rows-layout opset-13 export never produces it.
+    """
+workaround    = """
+    Prefer the torchscript opset-13 rows-layout export, which avoids the entire
+    class (patch_for_stedgeai.py's docstring says the dynamo patches are
+    deliberately not implemented for that reason). If a dynamo/opset-20 artifact
+    must be used: replace Shape-subgraph shape inputs with static shape
+    initializers and dead-code-eliminate the subgraph; constant-fold
+    `Shape(end=...)` and `Expand`/ones_like into constants. Registry note: Shape
+    and Expand are already outside STM32N6_ALLOWED_OPS so the existing
+    op-vocabulary lint catches them; only the allowzero=1 Reshape is genuinely
+    uncovered.
+    """
+patch         = "fold_dynamo_shape_subgraphs"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
+
+[[issue]]
+id            = "einsum-block-diagonal-projection"
+failure_class = "SHAPE_COMPUTATION_REJECTION"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    Einsum block-diagonal projections (monarch/butterfly) fail front-end shape
+    inference on both NPU and CM55 targets
+    """
+error_signature = "TOOL ERROR: Error in computation of shapes"
+symptom       = """
+    `stedgeai generate` fails early on stock monarch/butterfly exports whose
+    block-diagonal projections are `Einsum 'bkp,kqp->bkq'` (8 independent small
+    matmuls). Constant-folding the dynamic-shape Pad/Reshape scaffolding still
+    crashes (`Error in computation of shapes` / `Unknown dimensions: H`). The
+    same checkpoints failed identically when the power campaign tried to reuse
+    them.
+    """
+cause         = """
+    Front-end shape inference, NOT the Neural-ART back end: monarch_8,
+    monarch_full and butterfly_full all fail with the same error on the SOFTWARE
+    (CM55) target too. It is a toolchain limit and says nothing about NPU
+    architecture.
+    """
+workaround    = """
+    Re-express the block-diagonal projections in the vocabulary the compiler
+    already maps: rank-2 per-block `Slice` + `MatMul` + `Concat` on [1,N], flat
+    state tensors (no [2,B,400]+Gather), no Pad, no Einsum, no grouped conv, and
+    rewrite the gate as `n + z*(h-n)` to avoid the scalar-constant Sub.
+    deploy/stm32n6/host/export_monarch_npu.py does this end-to-end (parity
+    ~5e-7).
+    """
+patch         = "rank2_slice_matmul_concat_reexport"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+
+[[issue]]
+id            = "gemm-with-activation-bias-input"
+failure_class = "UNSUPPORTED_OP_FORM"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    MatMul+Add fused into a Gemm whose C is an activation kills the int8 Gemm
+    lowering
+    """
+error_signature = "TOOL ERROR: list index out of range"
+symptom       = """
+    `stedgeai generate` on the int8 dense NSNet2 model dies about halfway
+    through the optimizer passes. Bisection with `onnx.utils.extract_model`
+    isolates it exactly: a subgraph cut at a Gemm with static bias compiles, a
+    subgraph cut at a Gemm with activation C fails.
+    """
+cause         = """
+    PyTorch exports the unrolled GRU recurrence h' = W_h.h + (W_i.x + b), and
+    onnxruntime's graph optimizer (run inside quant_pre_process) fuses
+    MatMul+Add into a single Gemm whose C (bias/beta) input is an activation
+    tensor - nodes named */MatMulAddFusion. The Neural-ART int8 Gemm lowering
+    expects C to be a constant per-channel bias vector and indexes into a
+    quantized-bias list that is empty for such a Gemm.
+    """
+workaround    = """
+    Re-quantize with `quant_pre_process(fp32, pre, skip_optimization=True)`
+    before `quantize_static` - the one change - so MatMul and Add stay separate
+    ops; the 4 recurrent activation-C Gemms become 12 MatMul + 20 Add.
+    Numerically equivalent with identical calibration: cos 0.9996 vs the
+    committed fused int8, no PESQ change (still 2.833). Lint predicate: any Gemm
+    whose input[2] is not an initializer.
+    """
+patch         = "unfuse_activation_bias_gemm"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
+
+[[issue]]
+id            = "pad-scalar-constant-value"
+failure_class = "TOOL_EMITTED_INITIALIZER_REJECTED"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    atonn rejects the 0-d constant_value initializer that the ST front end
+    itself re-emits for Pad
+    """
+error_signature = "Failed to build a valid graph: missing shape or size for value=Pad_*_constant_value"
+symptom       = """
+    Any constant-mode zero `Pad` breaks the build: the ST front end re-emits
+    Pad's `constant_value` as a scalar (dims `[]`) initializer and the atonn
+    backend then refuses to build a graph from it. The authored ONNX is valid
+    and runs in ORT, and the offending tensor is generated by ST - so it cannot
+    be avoided by editing the Pad's own input.
+    """
+cause         = """
+    atonn's graph builder has no representation for a zero-dimensional
+    initializer (it carries no shape or size), and the front end hands it one
+    for every Pad constant_value.
+    """
+workaround    = """
+    pads_to_concats(model): eliminate Pad entirely, expressing it as Concat
+    against explicit zeros initializers. Per node assert mode=='constant', pads
+    constant, input shape static, constant_value==0.0. Walk axes 0..rank-1; for
+    each side with amt!=0 build a zeros initializer of the RUNNING shape with
+    dim[ax]=amt (earlier axes have already grown), emit Concat(axis=ax) with
+    [zeros,cur] for begin or [cur,zeros] for end, then rename the LAST Concat's
+    output to the Pad's original output. Guard on any(pads) -
+    `new_nodes[-1].output[0] = n.output[0]` would otherwise clobber an unrelated
+    node. The '_cc_ax' substring in generated names is load-bearing: the
+    pre-quantized-zeros pass keys off it.
+    """
+patch         = "pad_to_concat_zeros"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
+
+[[issue]]
+id            = "quantized-concat-fp32-zeros-dtype-mix"
+failure_class = "QUANTIZED_DTYPE_MISMATCH"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    The Pad->Concat rewrite kills the compiler on a dtype Conversion unless the
+    zeros are pre-quantized
+    """
+error_signature = "not implemented shape len for Conversion"
+symptom       = """
+    After Pad has been rewritten to Concat, the compiler dies where a plain fp32
+    zeros initializer is concatenated with a tensor coming out of the quantized
+    (QDQ) region. A fix for one failure directly manufactures the next.
+    """
+cause         = """
+    The Concat sibling tensor is int8/QDQ; a float zeros initializer creates a
+    type boundary ST will not insert a conversion for. (The exact mechanism - a
+    Conversion epoch failing on tensor rank - is inference; only the error
+    string and 'the compiler dies on a dtype Conversion' are attested.) Note the
+    quantized region exists partly because repair_mask_consistency clones a
+    MaxPool/Reshape/Concat/Pad chain AFTER quantization, so those clones inherit
+    the quantized grid.
+    """
+workaround    = """
+    quantize_pad_zeros(model): fire on Concat nodes whose name contains '_cc_ax'
+    and that have BOTH a 'zeros' input and a non-zeros input. From the first
+    non-zeros input walk producers backwards to the nearest DequantizeLinear,
+    recursing through TRANSPARENT ops {Unsqueeze, Reshape, Concat, Slice,
+    Squeeze, Transpose, MaxPool, AveragePool, ReduceMax, Pad, Relu, Clip},
+    depth-limited to 24. Take that DQ's scale and zero_point NAMES, create an
+    int8 initializer of the zeros shape filled with int(zero_point) named
+    zeros+'_q', insert DequantizeLinear(zeros_q, scale, zp) immediately before
+    the Concat and rebind. Value-preserving by construction: (zp-zp)*scale ==
+    0.0 exactly. Caveats: only the FIRST zeros operand and FIRST data operand
+    are handled; the DQ walk assumes the whole transparent chain shares the
+    sibling's grid.
+    """
+patch         = "prequantize_concat_pad_zeros"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
+
+[[issue]]
+id            = "rank1-graph-input-through-reshape"
+failure_class = "SHAPE_COMPUTATION_REJECTION"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    Rank-1 graph input feeding an in-graph Reshape trips the same
+    shape-computation error
+    """
+error_signature = "TOOL ERROR: Error in computation of shapes"
+symptom       = """
+    A graph input declared rank-1 (`w [3]`) that is immediately Reshaped to
+    `[1,3]` inside the graph fails `generate` with the same shape-computation
+    error as the Slice sentinels. Rank-2+ inputs with the Reshape removed are
+    accepted. Bit-exact in ORT either way.
+    """
+cause         = """
+    The ST front end cannot compute shapes through a rank-1 runtime graph input
+    consumed by an in-graph Reshape; the declared input rank must already match
+    what the consumers need. A detector keyed only on Slice will miss this half
+    of the failure class.
+    """
+workaround    = """
+    promote_w(model): find the single Reshape whose input[0] is the rank-1 graph
+    input, delete it, rewire every consumer of its output to the graph input
+    directly, and redeclare the input's dims as [1,N]. Implemented as patch 2 in
+    patch_for_stedgeai.py. This is an I/O-CONTRACT CHANGE - every feeder must
+    now pass shape [1,N] (main() feeds `W_VEC` unpatched vs `W_VEC[None]`
+    patched). Generalize away from the hardcoded tensor name 'w' and shape (1,3)
+    by reading N from the Reshape's shape initializer; the orphaned shape
+    initializer is left behind (no DCE).
+    """
+patch         = "promote_rank1_graph_input"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
+
+[[issue]]
+id            = "slice-sentinel-bounds"
+failure_class = "SHAPE_COMPUTATION_REJECTION"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    Slice with INT64_MAX / negative sentinel ends aborts front-end shape
+    computation
+    """
+error_signature = "TOOL ERROR: Error in computation of shapes"
+symptom       = """
+    `stedgeai generate` aborts during front-end shape computation on any graph
+    containing a Slice whose starts/ends use the ONNX open-ended sentinels (-1,
+    INT64_MAX) or negative bounds - which is exactly what a stock ONNX exporter
+    emits for open-ended slices. The same graph runs correctly in onnxruntime
+    and passes the repo's own device lint.
+    """
+cause         = """
+    ST Edge AI 4.0.1's importer evaluates Slice bounds literally instead of
+    applying the ONNX clamping/wrap rules, so any start/end outside [0, dim] is
+    not resolvable to a concrete output shape.
+    """
+workaround    = """
+    normalize_slices(model): run
+    onnx.shape_inference.infer_shapes(strict_mode=False, data_prop=True), build
+    a const table from initializers plus Constant-node attribute tensors, and
+    for every Slice with a fully static input[0] and constant starts/ends
+    compute new_start = s+d if s<0 else min(s,d); new_end = e+d if e<0 else
+    min(e,d) per axis, emitting `{node}_starts_norm`/`{node}_ends_norm` int64
+    initializers. Idempotent (skip when nothing changed). Implemented as patch 1
+    in patch_for_stedgeai.py; parity-checked bit-exact in ORT. Reimplementation
+    caveats: steps (input[4]) are untouched and the rewrite is only
+    value-preserving for positive unit steps - gate on step>0 or absent;
+    INT64_MIN is not normalized.
+    """
+patch         = "normalize_slice_bounds"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
+
+[[issue]]
+id            = "transpose-of-runtime-tensor"
+failure_class = "FRONTEND_INTERNAL_ERROR"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    In-graph Transpose of a runtime (non-initializer) tensor fails with an
+    internal channel-position error
+    """
+error_signature = "INTERNAL ERROR: Mismatch in channel position"
+symptom       = """
+    `convfsenet_head_bwd` (12 nodes) fails on the Neural-ART path AND on the
+    plain-M55 path (`--target stm32n6` without `--st-neural-art`). Op-by-op
+    bisection with onnx.utils.extract_model isolated it to the in-graph
+    `Transpose` of a runtime tensor; dynamic x dynamic MatMul, the elementwise
+    chain, rank-2 ReduceSum and the ReduceMean path all compile in isolation -
+    so the natural suspect (dynamic MatMul) is the wrong one to blame.
+    """
+cause         = """
+    The ST Edge AI 4.0.1 front end cannot assign/resolve a channel axis for a
+    Transpose whose input is not an initializer.
+    """
+workaround    = """
+    Move the transpose off the device: `HeadBackwardHT` takes `hT [B, T, 192]`
+    pre-transposed as a graph input (banking h in transposed layout is the same
+    memcpys with different strides, so it is free). Bit-exact with the original;
+    then compiles and measures 34.2 ms/update on `n6-noextmem`. Second recorded
+    option: hand-write the two matmuls in C/CMSIS-DSP.
+    """
+patch         = "pretranspose_head_backward_input"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/head.py"]
+
+[[issue]]
+id            = "bool-quant-json-discards-all-quantization"
+failure_class = "QUANTIZATION_SILENTLY_DISCARDED"
+stage         = "compile"
+zoo_action    = "compile-postcondition"
+title         = """
+    SILENT: one BOOL tensor in the generated *_Q.json makes atonn discard the
+    entire quantization and build an fp32 network
+    """
+error_signature = "INVALID_ARGUMENT:(tensors[N].value.format.type): invalid value \"BOOL\" for type ...GraphInfo.ContainerType Ignore Quantization JSON file; unsupported version ''"
+symptom       = """
+    `stedgeai generate` SUCCEEDS and produces a working-looking network, but ALL
+    quantization has been thrown away and every float tensor is treated as
+    native float - wrong size, wrong latency, wrong memory footprint versus what
+    was asked for. atonn emits two NON-FATAL lines and continues, so a caller
+    checking exit status sees success and the failure surfaces only as
+    unexplained size/latency/accuracy figures downstream. The most dangerous
+    quantization outcome in this catalogue.
+    """
+cause         = """
+    For graphs containing `Equal`/`Cast` (e.g. max-pool gradient masks in a
+    fused fwd+bwd loss graph) the `*_Q.json` emitted by ST's OWN front end
+    contains entries with \"type\": \"BOOL\". BOOL is not a valid
+    GraphInfo.ContainerType for atonn's protobuf parser, which rejects the whole
+    file on the first unrecognised entry instead of skipping it, downgrades the
+    parse failure to an 'unsupported version' warning, and falls back to 'no
+    quantization info'.
+    """
+workaround    = """
+    Strip BOOL entries from `*_Q.json` between the front end and atonn. The
+    projects shimmed the binary: move `atonn` -> `atonn.real` and drop
+    `atonn_shim.sh` in its place; the shim scans argv for `--json-quant-file`,
+    deletes every key in d['tensors'] whose ['format']['type'] == 'BOOL',
+    rewrites the file in place with indent=1 only if at least one BOOL was
+    found, then exec's atonn.real with the ORIGINAL argv. WORKFLOW TRAPS: (a)
+    the shim MUTATES the front end's output file in place; (b) it has since been
+    REMOVED, so any later `generate`/`validate` on the loss graph silently
+    regresses to an unquantized build unless re-installed. Independently verify
+    quantization survived by checking the generated network's weight size and
+    epoch mix against expectation rather than trusting a successful build.
+    Static detection is only a PRECURSOR heuristic (Equal/Cast producing BOOL in
+    a graph you intend to quantize) - the *_Q.json exists only after stedgeai
+    runs.
+    """
+patch         = "strip_bool_from_quant_json"
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/atonn_shim.sh"]
+
+[[issue]]
+id            = "oe-export-not-bit-equal-to-authored-onnx"
+failure_class = "FRONT_END_SEMANTIC_DRIFT"
+stage         = "compile"
+zoo_action    = "compile-postcondition"
+title         = """
+    SILENT: the compiler's optimized export (*_OE_*.onnx) is not bit-equal to
+    the deployable ONNX and changes the input layout
+    """
+symptom       = """
+    Running ST's own optimized export on the host under onnxruntime, fed in the
+    layout the compiler chose ([1,160,25] rather than the authored [1,25,160]),
+    reproduces the host reference but not exactly: scores 2.434/2.444/1.628 vs
+    the deployable ONNX's 2.403/2.404/1.619, gradient cosine 0.80 vs 1.000. No
+    warning marks the difference. NOTE: the source presents this table under the
+    heading 'The compiled graph itself is correct' and lists front-end
+    miscompilation as RULED OUT - it never calls the 0.80 a defect.
+    """
+cause         = """
+    The front-end transformation preserves graph semantics but rewrites it,
+    including the input tensor layout, so bit-equality with the authored ONNX is
+    not expected. IMPORTANT: the 0.80 is a single draw on an int8 graph whose
+    host gradient is nondeterministic across identical reruns (5-50% of runs
+    diverge, worst cosine 0.036, int8 cosine plateaus near 0.5) - it is not a
+    calibrated tolerance and part or all of it may be host tie-routing noise.
+    """
+workaround    = """
+    Build the host reference from the *_OE_*.onnx export as well as the authored
+    ONNX, and feed it in the compiler's chosen layout. Running the OE graph in
+    ORT is the single cheapest test that separates a front-end miscompilation
+    from a runtime defect - do it before blaming the device. Do NOT adopt a
+    fixed drift budget from a single int8 run.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md"]
+
+[[issue]]
+id            = "quantize-static-emits-unquantized-graph"
+failure_class = "SILENT_NOOP_QUANTIZATION"
+stage         = "quantize"
+zoo_action    = "compile-postcondition"
+title         = """
+    SILENT: quantize_static emits a fully unquantized graph when calibration
+    yields nothing or exclusions cover every op
+    """
+symptom       = """
+    quantize_static returns successfully and writes an .onnx that loads and
+    runs, but the graph contains ZERO QuantizeLinear nodes - it is the fp32
+    graph with quantization metadata absent. Downstream everything 'works' and
+    the deploy is silently fp32.
+    """
+cause         = """
+    A CalibrationDataReader that yields no frames (exhausted iterator, empty
+    dataset, wrong input names) produces no ranges, and an over-broad
+    nodes_to_exclude / exclude_op_patterns can skip every quantizable op.
+    Neither condition is an error for ORT.
+    """
+workaround    = """
+    Reload the WRITTEN artifact from disk and assert on the op histogram before
+    signing off: assert Counter(op_type)['QuantizeLinear'] > 0, plus the sibling
+    audits eco8 runs (0 opaque GRU/LSTM/RNN nodes, 0 surviving
+    BatchNormalization). Pure post-hoc ONNX check - no ST tool needed - and
+    re-loading from disk is what proves the on-disk artifact is what you sign
+    off.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/convfsenet/quant.py"]
+
+[[issue]]
+id            = "quantizing-every-mul-zeroes-gradient"
+failure_class = "SILENT_GRADIENT_DESTRUCTION"
+stage         = "quantize"
+zoo_action    = "compile-postcondition"
+title         = """
+    SILENT: registering Mul for QDQ quantization zeroes the loss graph's
+    gradient (norm 11.07 -> 0.00); Add degrades it to 0.54
+    """
+symptom       = """
+    quantize_static completes without error, onnx.checker passes, the graph runs
+    in ORT and returns finite scores - but the gradient output of the fused
+    forward+backward loss graph collapses to exactly zero. Measured on the 1 s
+    crop against the un-quantized-elementwise baseline of 11.07: +Sub gives
+    11.07 (harmless), +Add gives 0.54 (severe degradation), +Mul gives 0.00
+    (destroyed). Mul is simultaneously the op that matters for memory and the
+    one that silently zeroes the gradient.
+    """
+cause         = """
+    ORT's QDQ quantizer only knows Conv/Gemm/MatMul-family ops by default;
+    elementwise ops can be forced in by binding them to QDQOperatorBase in the
+    module-global QDQRegistry, which makes quantize_static insert Q/DQ around
+    EVERY node of that type. The backward routes max-pool gradients through
+    small Mul nodes deep in the fc backward whose values sit far below the
+    per-tensor int8 grid chosen by MinMax calibration on the big tensors, so
+    quantizing them rounds the surviving gradient signal to zero. Add is the
+    same failure one order less severe.
+    """
+workaround    = """
+    Never register Add. Register only Mul and Sub (ELEMENTWISE_QUANT_OPS) and
+    restrict quantization to the peak-setting nodes: large_elementwise_nodes()
+    runs shape inference, computes peak = max element count over
+    value_info+output, sets cutoff = peak/4, and marks a Mul/Sub 'big' if
+    prod(output dims) > cutoff (6 of 45 nodes on the 1 s crop); every 'small'
+    node goes to nodes_to_exclude and stays fp32. GATE any
+    elementwise-quantization change on gradient norm against the
+    unquantized-elementwise baseline (11.07), not on whether the graph builds.
+    Restore QDQRegistry afterwards - it is module-global (quantize_qdq wraps the
+    call in a context manager). What is statically checkable is only the
+    CONFIGURATION (is Mul registered / in op_types_to_quantize); the effect
+    needs a numeric run. Note the memory payoff claimed to justify the -0.057
+    MOS cost (1.95 MB fitting n6-noextmem) did NOT materialize on target.
+    """
+patch         = "quantize_only_peak_setting_elementwise"
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md", "/home/claroche/dnsmos_exported/src/dnsmos_trainable/export.py"]
+
+[[issue]]
+id            = "analytic-activation-peak-is-lower-bound"
+failure_class = "ON_CHIP_ALLOCATION_FAILURE"
+stage         = "compile"
+zoo_action    = "compile-postcondition"
+title         = """
+    Host-side activation-peak estimates are a lower bound, not an allocation
+    (1.95 MB estimate -> 116 MB unallocatable)
+    """
+symptom       = """
+    budget.py reported a fused-QDQ activation peak of 1.95 MB and printed that
+    the artifact fits the 2.8 MB `n6-noextmem` pool. atonn then reported 116 MB
+    unallocatable on the on-chip pools and the graph only built under
+    `n6-allmems-O3` with 23.3 MB of activations (20.6 MB in hyperRAM) - a ~12x
+    miss on the same int8+elementwise artifact. The 1 s forward crop likewise
+    fails n6-noextmem allocation and needs n6-allmems-O3 with 5.0 MB in
+    hyperRAM.
+    """
+cause         = """
+    peak_activation returns the size of the single largest live tensor. It is
+    not a liveness/allocation analysis: it ignores simultaneously-live tensors,
+    scratch/workspace buffers, per-epoch double buffering, alignment and pool
+    granularity, and any layout transform the compiler applies. Both analytic
+    conventions are lower bounds - ORT-CPU (7.78 MB, materializes floats between
+    Q/DQ pairs) and fused-QDQ (1.95 MB) - and the earlier rule 'only the fused
+    number decides on-chip fit' is refuted: neither decided it; the allocator's
+    per-pool assignment is the only authority.
+    """
+workaround    = """
+    Treat every analytic peak as a strict LOWER BOUND, never as a pass/fail
+    gate, and report which convention is in use. Confirm with `stedgeai
+    generate` / `stedgeai validate --mode target` before claiming a pool fit;
+    fall back to `n6-allmems-O3` (hyperRAM) or shrink the window. For reference,
+    budget.weight_bytes(model) = sum(numpy_helper.to_array(t).nbytes for t in
+    graph.initializer) counts EVERY initializer including QDQ scale/zero-point
+    tensors and int64 shape constants at real dtype width, and materializes each
+    tensor (external-data models must be loadable).
+    """
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/budget.py"]
+
+[[issue]]
+id            = "int8-grouped-conv-hw-lowering-assert"
+failure_class = "HW_LOWERING_ASSERT"
+stage         = "compile"
+zoo_action    = "compile-postcondition"
+title         = """
+    Neural-ART HW lowering asserts on int8 grouped convs with degenerate 1x1
+    spatial chained through gate math
+    """
+error_signature = "lower_arith_set_in_batch conf_CONV_IN_ACTIVATION"
+symptom       = """
+    A 4-D grouped-conv re-export compiles in FP32 but the int8 build hits
+    Neural-ART HW-lowering (batch-dim) assertions on the convs that consume the
+    GRU's elementwise outputs. An isolated grouped 1x1 int8 conv maps to HW
+    fine; chained through the gate math on degenerate 1x1 spatial, the conv-DMA
+    path breaks - so isolated probes do not reproduce it.
+    """
+cause         = """
+    Genuinely NPU back-end specific (batch-dim asserts in the HW lowering /
+    conv-DMA path), unlike the front-end shape-engine class. Context-dependent.
+    """
+workaround    = """
+    Avoid the 4-D grouped-conv-on-[1,C,1,1] formulation for int8; use the rank-2
+    MatMul vocabulary instead. If a 2-D front end is being considered, run a
+    generate-only probe FIRST (Gate-0D: Conv2d(1->24, k=3, stride=(1,2)) int8
+    over [1,1,256,L]) and cancel the design if it fails this way.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/EFFICIENCY_REWORK_PLAN.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/WINDOWED_DEPLOY_HANDOFF.md"]
+
+[[issue]]
+id            = "noextmem-profile-does-not-fit"
+failure_class = "ON_CHIP_ALLOCATION_FAILURE"
+stage         = "compile"
+zoo_action    = "compile-postcondition"
+title         = """
+    The all-on-chip n6-noextmem profile cannot fit models whose
+    weights+activations exceed the ~2.8 MB of pools
+    """
+symptom       = """
+    `n6-noextmem` (weights in npuRAM) cannot compile the graph and the model
+    must fall back to `n6-allmems-O3` with weights in external octoFlash - which
+    for weight-heavy models makes it memory-bandwidth-bound (dense NSNet2: 2.81
+    MB read per frame at 122 MB/s ~= the whole 22.94 ms, RTF 1.43).
+    """
+cause         = """
+    The N6 has roughly 1.8 MB npuRAM + 1 MB cpuRAM; the LiSenNet windowed graph
+    needs weights+activations 3.35 MB > 2.8 MB of usable pools, and dense NSNet2
+    is 4.15 MB short.
+    """
+workaround    = """
+    Check weights+activations against ~2.8 MB before choosing a profile; shrink
+    weights (structured-sparsity re-export took monarch_full 2.85 MB -> 0.86 MB
+    file / 0.72 MB on-chip) or accept `n6-allmems-O3` where the weight traffic
+    is small enough to be free (492 KiB streams at ~13 MB/s at no cost). Weights
+    are countable from the ONNX but the activation total comes from the
+    compiler's allocator, so the decision needs a compile.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
+
+[[issue]]
+id            = "compiler-chooses-io-layout-per-graph"
+failure_class = "IO_LAYOUT_REORDERED"
+stage         = "validate"
+zoo_action    = "board-invariant"
+title         = """
+    SILENT: the compiler picks input layouts per graph, so a hard-coded host
+    feeder feeds transposed garbage
+    """
+symptom       = """
+    The same `wav` input is laid out `[1,160,100]` for the loss graph but
+    `[1,100,160]` for the forward graph (and [1,160,25] vs the authored
+    [1,25,160] for the 0.25 s crop). A feeder that assumes the ONNX layout gets
+    NO error and feeds transposed data; separately, `stedgeai validate --mode
+    target` itself errors on the loss graph because its host-side feeder builds
+    `(1,100,1,160)`.
+    """
+cause         = """
+    ST Edge AI picks the on-device tensor layout per compiled network; it is not
+    a property of the source ONNX. The validate-refuses half is a host-tooling
+    limitation riding on the same behaviour.
+    """
+workaround    = """
+    Read the device's I/O descriptors at runtime via `ai_runner.get_info()` and
+    lay out buffers from that - never assume the ONNX order. When `validate
+    --mode target` refuses a multi-input graph, this layout mismatch is the
+    first thing to check. The chosen layout only exists after generate, so it
+    must be read from the artifact/device, not predicted.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md"]
+
+[[issue]]
+id            = "int8-forward-systematic-mos-bias"
+failure_class = "SILENT_NUMERIC_DIVERGENCE_ON_TARGET"
+stage         = "validate"
+zoo_action    = "board-invariant"
+title         = """
+    SILENT: on-target int8 forward scorer runs at cos 0.996 but with a
+    systematic +0.23 MOS bias vs the host ONNX
+    """
+symptom       = """
+    On-target `validate` of the DNSMOS forward int8 graph reports mos cosine
+    0.996 against the host int8 ONNX - a number that reads as a pass - while
+    carrying a systematic +0.23 mean bias (mae 0.245 over 10 random samples,
+    |dmos| up to 0.46 on a real VoiceBank-DEMAND clip). Cosine similarity hides
+    it because a constant offset barely moves the angle. Anyone using on-device
+    scores as an absolute number is silently off by a quarter MOS point.
+    """
+cause         = """
+    ST's realization of the int8 body plus float frontend is not bit-compatible
+    with ORT's QDQ semantics (rounding, accumulation order, fused Q/DQ
+    boundaries); routed through the model's global-max the per-element
+    differences concentrate into a directional bias rather than cancelling as
+    noise.
+    """
+workaround    = """
+    Never use cosine alone as the fidelity gate - check mean error/bias too.
+    Recalibrate any absolute threshold against the DEPLOYED artifact measured on
+    target, never against the host ONNX; use on-device scores only relatively
+    (cosine/ranking) unless recalibrated. Requires an on-target validate run;
+    not predictable from the ONNX.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md"]
+
+[[issue]]
+id            = "int8-input-independent-constant-output"
+failure_class = "SILENT_RUNTIME_OUTPUT_CORRUPTION"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    SILENT: at int8 the same defect widens - every output becomes
+    input-independent and the fp32 gradient holds int8 zero-point bytes and NaNs
+    """
+symptom       = """
+    Compile and run both succeed. crop0p25s_int8_d2_rows_dev.onnx (201 epochs:
+    35 HW / 41 hybrid / 125 SW, 2.24 MB weights, 6.67 MB activations) returns
+    mos SIG/BAK/OVRL = 1.909 (0x3ff465d9) / 1.448 (0x3fb959d2) / 1.143
+    (0x3f925cd8) BYTE-IDENTICAL across different clips (host reference
+    2.403/2.404/1.619 and 1.392/1.424/1.190) and across FOUR builds (-O3, -O1,
+    no --Ocache-opt/--cache-maintenance, --Opreserve-inputs). The float32 grad
+    buffer holds 0x808080F2-pattern words (0x80 is this graph's int8 activation
+    zero-point, i.e. raw int8 bytes read as float32) plus NaNs 0x7FC00000,
+    overflowing at 100-300x the host norm. The two outputs fail DIFFERENTLY:
+    scores are deterministically wrong (same bits every run and build), the
+    gradient is non-deterministically wrong (non-finite count moved 176 -> 460
+    and 491 -> 1304 across runs of identical firmware and identical input). The
+    values are plausible MOS numbers, so nothing flags them.
+    """
+cause         = """
+    Same root cause as sw-epoch-large-output-corruption - the source's own
+    analysis says quantization widens the blast radius rather than causing it,
+    and the ruled-out list is identical. Stable-wrong small outputs plus
+    unstable-wrong large output points at a stale or uninitialized buffer being
+    consumed rather than an arithmetic error. Not a graph fault: ST's own OE
+    export in ORT matches the deployable artifact (mos within 0.03, grad cos
+    0.80), the fed input is verifiably correct at the device buffer, and a
+    bare-runtime firmware (firmware_loss/, no protobuf, no ai_runner, input
+    baked into flash) reproduces the identical bits - exonerating the validation
+    stack.
+    """
+workaround    = """
+    None on the toolchain side - vendor defect, bug report filed. ALWAYS run an
+    input-independence probe on target: feed two materially different inputs and
+    assert the outputs differ; a single-input check cannot see this. Fingerprint
+    the corruption by hexdumping the float32 output - 0x80 zero-point bytes or
+    0x7FC00000 NaNs inside a float buffer identify this class. Run the same
+    input twice on identical firmware and compare non-finite counts to separate
+    deterministic (arithmetic/constant) wrongness from stale-buffer wrongness.
+    Avoid graphs with a large fp32 elementwise region between int8 blocks; the
+    forward-only variant and the PESQ predictor, which have none, run correctly
+    on the same board.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md"]
+
+[[issue]]
+id            = "printf-float-wedges-uart"
+failure_class = "FIRMWARE_IO_WEDGE"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA, SILENT: %f wedges the UART mid-line because the firmware does not
+    link newlib float printf
+    """
+symptom       = """
+    Printing a float from a bare-runtime firmware silently truncates the UART
+    output mid-line and stops it; no error, no crash - the run looks like a
+    device hang or a missing result.
+    """
+cause         = "The firmware project does not link newlib's float printf support."
+workaround    = """
+    Print IEEE-754 bit patterns as hex words instead of using %f - this is how
+    the constant-output defect was captured byte-for-byte (0x808080F2,
+    0x7FC00000). Not a model failure.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "reloc-copy-io-inert-constant-input"
+failure_class = "SILENT_CONSTANT_INPUT_IO_PLUMBING"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA, SILENT: in reloc+COPY mode host writes never reach the network input,
+    so every sub-net runs on a constant input
+    """
+symptom       = """
+    No error, no crash, plausible timings and plausible outputs. Every
+    relocatable sub-net computes from a constant (zero-initialised) input, so a
+    data-dependent router always emits the same argmax and an early-exit
+    orchestrator collapses to a fixed depth after the first frame. It was
+    originally MIS-DIAGNOSED as a MODEL verdict ('the int8 gater lands
+    borderline, so depth collapses after frame 0').
+    """
+cause         = """
+    In reloc + COPY mode the buffer descriptor exposes the compile-time npuRAM
+    I/O address (0x34270000) while the NPU actually reads from a different,
+    relocated, zero-initialised location. `set_input`/`get_input` are inert for
+    these `allocate-inputs` graphs (`is_user_allocated==0`), so host writes land
+    at an address nothing reads. Verified: input readback rbsum==fsum at
+    0x34270000, yet an isolated frontend emits a constant bias-only vector for
+    all inputs.
+    """
+workaround    = """
+    Treat per-net COMPUTE LATENCY as valid (conv sub-graphs are
+    data-independent) but treat ANY data-dependent on-device result from this
+    path as INVALID. To get real per-frame decisions, drive the decision network
+    through the standard (non-reloc) `aiValidation` serial path with
+    `ai_runner`, threading the recurrent state on the host. General guard: feed
+    two distinct inputs and assert the outputs differ before trusting any
+    dynamic measurement.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_router/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_optionC/README.md"]
+
+[[issue]]
+id            = "sw-epoch-large-output-corruption"
+failure_class = "SILENT_RUNTIME_OUTPUT_CORRUPTION"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    SILENT: a large tensor written as a graph output by a software epoch comes
+    back corrupt while small outputs are exact
+    """
+symptom       = """
+    Same inference, two outputs: the small one is exact, the large one is
+    garbage. On the pure-fp32 PESQ loss graph (169 epochs: 13 HW / 18 hybrid /
+    138 SW, 2.70 MB weights, 3.49 MB activations, n6-allmems-O3) the score
+    matches the host to the digit (3.292/1.104/3.647) while the 64.7 kB grad_enh
+    [1,257,63] output is corrupt by 9-11 orders of magnitude (cosine
+    -0.022/0.002/-0.005, ratio 1.6e9-6.8e10). `stedgeai generate` completes with
+    no error and no warning. The pattern holds across every network measured:
+    trunk (1 output + 9 states) correct 4.24 ms, DNSMOS forward (2 tiny)
+    correct, PESQ predictor (1 tiny) exact to 0.006 PESQ, PESQ loss (tiny + 64.7
+    kB) half corrupt, DNSMOS loss (2 tiny + 64 kB) all corrupt.
+    """
+cause         = """
+    Vendor defect in generated code / NPU runtime when a software epoch writes a
+    large graph output - the buffer is either not committed to the address the
+    runtime reports, or committed with the wrong stride/type/size, so the host
+    reads uninitialized or partially-written memory. It reproduces with NO
+    quantization anywhere, so the discriminating variable is a LARGE OUTPUT
+    TENSOR EMITTED BY A SOFTWARE EPOCH, not quantization. RULED OUT: bad
+    ONNX/unsupported construct (lint + generate clean); front-end miscompilation
+    (the *_OE_*.onnx runs correctly in ORT); host driver / protobuf I/O (a bare
+    LL_ATON runner with the input baked into flash gives the same wrong bits);
+    input not reaching the device (byte-correct on chip, verified by read-back
+    and SWD dump); wrong input byte order (both layouts tested); optimization
+    level (-O3 == -O1); cache maintenance (no --Ocache-opt/--cache-maintenance
+    plus explicit clean/invalidate identical); input/output aliasing (allocator
+    had put wav and grad_wav both at 0x342e0000; --Opreserve-inputs separated
+    them to 0x342e0000/0x342e3e90, identically wrong); degenerate input
+    (zeros/0x80/tiny give 2.395/2.743/1.756 in ORT, not the device constant);
+    graph inherently input-independent (only 2 of 277 OE tensors are).
+    """
+workaround    = """
+    No fix known; reported to ST as an open defect against ST Edge AI Core
+    v4.0.1-20581 (7ed50de05) / LL_ATON v1.1.3. Mitigations that work: keep every
+    graph output small (all-small-output networks are correct on the same
+    board), split a large software-epoch output into small outputs, or recompute
+    it on the host. Treat ANY graph output larger than a few kB produced by a SW
+    epoch as unverified until compared against the host on several inputs.
+    Diagnostic protocol: run the compiler's own *_OE_*.onnx in ORT (correct)
+    against the device (wrong) - one step separates front end from runtime. Do
+    not chase cache, layout, optimization level or aliasing. Recommended ST
+    reproducer: the PESQ loss graph - fp32-only, 169 epochs, no
+    hand-quantization, no BOOL-JSON workaround, self-checking (score exact +
+    gradient wrong in the same inference). A lint can only approximate this
+    pre-compile by flagging large graph outputs; SW-epoch attribution needs the
+    compile report.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md"]
+
+[[issue]]
+id            = "validate-after-failed-load-times-stale-firmware"
+failure_class = "SILENT_MEASUREMENT_OF_STALE_RESIDENT_MODEL"
+stage         = "validate"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA, SILENT: validating after a failed firmware load times whatever model
+    is still resident in RAM
+    """
+symptom       = """
+    No error at all. `stedgeai validate --mode target` succeeds and prints a
+    plausible `duration ... ms by sample`, but the number belongs to the
+    previously loaded network still resident in the board's RAM, not to the
+    model under test. (Documented as a hazard the harness guards against, not as
+    a published wrong number.)
+    """
+cause         = """
+    The validation firmware is a volatile RAM image loaded over gdb. When
+    `n6_loader.py` fails part-way (the transient ST-LINK/usbip wedge), the board
+    keeps running the previous image; the host validate path has no identity
+    check that the resident network is the one just requested.
+    """
+workaround    = """
+    Gate every measurement on the loader printing \"Start operation achieved
+    successfully\" and abort the run otherwise; never let a harness proceed to
+    validate after a failed load. Cross-check the reported MACC/epoch count
+    against the model's own `network_generate_report.txt` before trusting a
+    latency figure.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "boot-switch-not-in-development-mode"
+failure_class = "BOOT_MODE_MISCONFIGURED"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: board not in development boot mode - the external loader cannot write
+    and RAM firmware does not persist
+    """
+symptom       = """
+    `make flash` cannot write through the external loader; separately, a
+    gdb-loaded RAM-resident validation firmware does not persist unless the
+    board is in development boot.
+    """
+cause         = """
+    The STM32N6 has no internal flash: the ROM bootloader loads the FSBL from
+    external xSPI at 0x70000000, and the BOOT1 DIP switch selects development vs
+    flash boot. It is a manual, non-scriptable hardware step, so it silently
+    drifts between campaigns (it was flipped once on a blind debugging
+    suggestion during the Aug-10/11 campaign).
+    """
+workaround    = """
+    Set BOOT1 to development boot before flashing or RAM-loading; set it back to
+    flash-boot and power-cycle for a standalone run. Record the switch position
+    used in a known-good session so it can be restored.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md"]
+
+[[issue]]
+id            = "dcache-not-maintained-around-npu-run"
+failure_class = "CACHE_COHERENCY_CORRUPTION"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: missing D-cache maintenance around an NPU run is the top cause of
+    garbage NPU output
+    """
+symptom       = """
+    The network runs without any error but produces garbage outputs, because the
+    NPU reads stale input data or the CPU reads stale output data from cacheable
+    AXISRAM.
+    """
+cause         = """
+    NPU input/output buffers (and reloc activations) live in cacheable AXISRAM;
+    the M55 D-cache must be cleaned after writing inputs and invalidated before
+    reading outputs.
+    """
+workaround    = """
+    Use the package's `mcu_cache_*` helpers: clean D-cache after writing NPU
+    inputs, invalidate before reading outputs, on EVERY inference. Note this was
+    explicitly ruled out as the cause of the large-SW-epoch-output corruption,
+    so eliminating it does not explain that defect.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_optionC/README.md"]
+
+[[issue]]
+id            = "linker-region-past-0x34200000-stack-in-npuram"
+failure_class = "LINKER_REGION_STACK_IN_INACCESSIBLE_RAM"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: growing AXISRAM1_S past 0x34200000 puts the M55 stack in npuRAM6 and
+    the firmware dies before UART
+    """
+symptom       = """
+    The firmware links and loads but produces no output at all - it crashes
+    before UART initialisation, so there is no banner and no error to read.
+    """
+cause         = """
+    `_estack = ORIGIN+LENGTH`, so extending AXISRAM1_S to 3712K places the M55
+    stack at 0x343A0000 (npuRAM6), which is not M55-accessible during early
+    startup (before RIF/NPU configuration).
+    """
+workaround    = """
+    Keep `LENGTH = 2048K` so the stack lands at 0x34200000 (cpuRAM2 top); reduce
+    the image instead - shrink the exec arena (COPY exec needed a deterministic
+    274424 B for 11 nets).
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_optionC/README.md"]
+
+[[issue]]
+id            = "loading-internal-memories-overflow-large-epoch-count"
+failure_class = "INTERNAL_RAM_OVERFLOW_AT_LOAD"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: high-epoch-count model plus the instrumented power-loop firmware
+    overflows internal RAM at load
+    """
+error_signature = "Loading internal memories"
+symptom       = """
+    A build that flashes and measures fine with the STOCK firmware (that is how
+    nb-20's 5.252 ms latency was measured) fails at `Loading internal memories`
+    on every retry when combined with the instrumented power-loop firmware.
+    """
+cause         = """
+    296 epochs' worth of descriptor tables plus the power-loop code appear to
+    overflow internal RAM. This is a HARNESS/firmware-footprint interaction, not
+    a property of the nb-20 graph - recording it as a model property risks a
+    future 'nb 20 doesn't fit' mis-conclusion.
+    """
+workaround    = """
+    Measure that model with the stock firmware, or slim the power loop / change
+    the memory layout before instrumenting a high-epoch-count graph.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md"]
+
+[[issue]]
+id            = "missing-ll-aton-runtimeinit-parks-forever"
+failure_class = "RUNTIME_INIT_OMITTED"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: a bare LL_ATON runner that skips LL_ATON_RT_RuntimeInit() parks in
+    WFE forever
+    """
+symptom       = """
+    The first `RunEpochBlock` never returns - the core sits in
+    `LL_ATON_OSAL_WFE()` indefinitely. Indistinguishable at first sight from the
+    genuine SW-epoch hang, and easily misattributed to the model.
+    """
+cause         = """
+    Missing `LL_ATON_RT_RuntimeInit()` call in a hand-written bare-runtime
+    application (no validation stack to do it for you).
+    """
+workaround    = """
+    Call `LL_ATON_RT_RuntimeInit()` before the first epoch block. Check this
+    BEFORE recording any new 'device hangs' verdict.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "power-loop-firmware-binds-zero-networks"
+failure_class = "STALE_FIRMWARE_ZERO_NETWORK_BIND"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: leftover power-harness main.c blocks ~125 s in power_loop() so
+    validate sees zero registered networks
+    """
+error_signature = "E200(ValidationError): TARGET: Unable to bind the ST.AI runtime with \"network\" c-model: [] E801(HwIOError): Invalid firmware - /dev/ttyACM0:921600"
+symptom       = """
+    Every `stedgeai validate --mode target` fails, for the graphs under test AND
+    for a known-good control graph. The firmware boots, answers serial and
+    prints a valid banner, but the host binds ZERO networks. Looks exactly like
+    a hardware/power-domain fault; WSL restart, Windows reboot, usbipd
+    detach/attach, boot-switch flip, clean gen dirs and gdb re-load all fail to
+    fix it.
+    """
+cause         = """
+    The NPU_Validation app's `Core/Src/main.c` had been replaced by the
+    power-harness variant
+    (`deploy/stm32n6/power_harness/main_with_power_loop.c`), which inserts
+    `power_loop()` between `aiValidationInit()` and `aiValidationProcess()`.
+    power_loop() runs a fixed ~125 s schedule, so the firmware initialises the
+    network correctly and then sits in the power loop for two minutes before
+    ever reaching the code that serves the host protocol; the host handshake
+    always lands inside that window. NOT the jumpers and not the graphs.
+    """
+workaround    = """
+    Read the firmware banner on /dev/ttyACM0 BEFORE blaming hardware - the tell
+    was the first banner line `PWR_DONE fid=4674 sat=46737 rt=1875`, printed by
+    power_loop() on completion. Restore the stock `Core/Src/main.c` from
+    `main.c.pwr_orig` (byte-identical to main.c.rt_bak/main.c.loss_bak) and keep
+    the power version as `main.c.pwr_loop_saved`. Restoring main.c forces a
+    relink, which then trips the GCC_PATH/Error-127 gotcha, so export GCC_PATH
+    too. Always bracket a campaign with a control graph whose latency is known.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md"]
+
+[[issue]]
+id            = "ram-firmware-lost-on-power-cycle"
+failure_class = "VOLATILE_FIRMWARE_LOST"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: the validation firmware is a volatile RAM image and is lost on any
+    power cycle
+    """
+symptom       = """
+    After a power cycle (or a board brown-out/replug), the board no longer holds
+    the validation firmware, so validate/profiler runs against it fail or,
+    worse, run against whatever is left.
+    """
+cause         = """
+    With the `n6-noextmem` profile the weights are loaded over gdb rather than
+    flashed, and the firmware itself is a RAM image; nothing survives loss of
+    power.
+    """
+workaround    = """
+    Re-run the `n6_loader.py` step after any power cycle or USB replug; for a
+    standalone power-on deployment an on-chip-resident boot layout / flashed
+    weights are required instead.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "sw-dequantizelinear-epoch-hang"
+failure_class = "DEVICE_HANG_IN_SW_EPOCH"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    Firmware never returns from a pure-SW DequantizeLinear epoch when the fp32
+    elementwise buffer grows
+    """
+symptom       = """
+    No error at all. On crop1s_int8_d2_rows_dev2 (204 epochs: 33 HW / 46 hybrid
+    / 125 SW, 2.36 MB weights, 23.3 MB activations, outputs 2 small + 256 kB)
+    report epochs epoch_1..epoch_64 complete in 2.5-4.9 s total (last: epoch_64,
+    Sub(float)), then the firmware NEVER returns from epoch_65 of 204 - a
+    pure-SW `DequantizeLinear` in the backward's first `Equal/Cast/Sub/Mul` mask
+    block, the peak-setting fp32 region, hyperRAM resident. Waited >10 min
+    twice; identical stop point across five loads and on both -O3 and -O1
+    builds. It reads exactly like a wedged board.
+    """
+cause         = """
+    Not the graph (identical outputs in ORT; the first 63 epochs run on target):
+    the ll_aton SW kernel and/or the hyperRAM placement of the peak-setting fp32
+    region. Believed by the reporter to be the same defect as the
+    large-software-epoch-output corruption, with the hang being the
+    larger-buffer manifestation (256 kB vs 64 kB); confirmation was an open
+    question to ST. Size/placement-dependent: the same topology cropped to 0.25
+    s completes all 205 epochs (4.80 s/window, activations 6.7 MB). NOT a board
+    or load flake - and it must not be confused with the ST-LINK wedge, which
+    has a distinct signature.
+    """
+workaround    = """
+    Shrink the fp32 elementwise/dequantize region so it fits on-chip SRAM: crop
+    the adaptation window to <=0.25 s, or quantize the mask chain itself.
+    Instrument with the LL_ATON epoch callback to identify the stalling epoch -
+    NOTE the runtime callback index is 0-based while the generate report's epoch
+    IDs are 1-based, so translate before quoting an epoch number. Before
+    spending time on the board, reload and rebuild at a different optimization
+    level to confirm the stop point is reproducible; do not re-flash or
+    power-cycle chasing an infra fault. Escalated to ST with
+    n6_gen/dnsmos_loss_crop1s_int8_d2 plus the reproduction.
+    """
+patch         = "crop_adaptation_window_0p25s"
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md"]
+
+[[issue]]
+id            = "corporate-pip-mirror-401"
+failure_class = "HOST_PACKAGE_MIRROR_AUTH_FAILURE"
+stage         = "fetch"
+zoo_action    = "infra-retry"
+title         = """
+    INFRA: the corporate pip mirror returns 401 when installing the profiler's
+    Python dependencies
+    """
+error_signature = "401"
+symptom       = """
+    Installing the ai_runner/profiler dependencies (pyserial, numpy, tqdm,
+    colorama, protobuf, tabulate) fails with HTTP 401 from the default
+    (corporate) pip index.
+    """
+cause         = """
+    The default configured pip index requires credentials this environment does
+    not have.
+    """
+workaround    = """
+    Create a dedicated venv and force the public index: `python3 -m venv
+    /tmp/profenv` then `/tmp/profenv/bin/pip install --index-url
+    https://pypi.org/simple/ pyserial numpy tqdm colorama protobuf tabulate`.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "no-stm32-target-found-on-swd"
+failure_class = "SWD_TARGET_NOT_FOUND"
+stage         = "board"
+zoo_action    = "infra-retry"
+title         = """
+    INFRA: SWD reports 'No STM32 target found' until the board's RESET button is
+    pressed
+    """
+error_signature = "No STM32 target found"
+symptom       = """
+    CubeProgrammer / gdbserver cannot see the target over SWD even though the
+    ST-LINK itself enumerates.
+    """
+cause         = """
+    The N6 target is left in a state where SWD cannot attach; a hardware reset
+    re-establishes it. (Source records symptom and remedy only; the mechanism is
+    inference.) Board-side only.
+    """
+workaround    = "Press the black RESET button on the DK and retry."
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md"]
+
+[[issue]]
+id            = "npu-profiler-per-layer-serial-timeout"
+failure_class = "SERIAL_TRANSPORT_TIMEOUT"
+stage         = "validate"
+zoo_action    = "infra-retry"
+title         = """
+    INFRA: npu_profiler PER_LAYER can time out over serial on graphs with 100+
+    nodes
+    """
+symptom       = """
+    The per-layer profiling run is very slow and can time out for graphs with
+    more than ~100 nodes over the 921600-baud VCP.
+    """
+cause         = """
+    PER_LAYER profiling round-trips per-node data over the serial link, and the
+    cost scales with node count.
+    """
+workaround    = """
+    Reduce batch size, profile only when the per-epoch split is actually needed,
+    and otherwise take total latency from `validate` - remembering the ~1 ms
+    method offset (see validate-vs-profiler-latency-offset).
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
+
+[[issue]]
+id            = "stale-gdbserver-or-busy-serial-port"
+failure_class = "HOST_RESOURCE_CONTENTION"
+stage         = "board"
+zoo_action    = "infra-retry"
+title         = """
+    INFRA: a stale ST-LINK_gdbserver process or a second reader on /dev/ttyACM0
+    blocks the next load/measurement
+    """
+symptom       = """
+    The loader or the validate/profiler run fails to take the debug link or the
+    serial port because a previous session's gdbserver is still alive, or
+    another process is reading /dev/ttyACM0.
+    """
+cause         = """
+    Both the SWD debug link and the VCP are exclusive resources; a crashed or
+    backgrounded previous run keeps them open.
+    """
+workaround    = """
+    `pkill -x ST-LINK_gdbserver` before every load (the documented flow does
+    this as step 2), and ensure nothing else is reading /dev/ttyACM0 during a
+    measurement.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "stlink-link-wedge"
+failure_class = "PROBE_LINK_WEDGED"
+stage         = "board"
+zoo_action    = "infra-retry"
+title         = """
+    INFRA: ST-LINK/usbip link wedges after a killed inference, a gdb weight
+    load, or a completed validate run
+    """
+error_signature = "Loading memories failed ! ST-LINK error (DEV_USB_COMM_ERR) could not connect: Connection timed out"
+symptom       = """
+    `n6_loader.py` aborts with `Loading memories failed !`, sometimes repeatedly
+    for the same graph, then loads first try after a USB cycle; or every
+    subsequent load attempt fails with DEV_USB_COMM_ERR. Triggered by killing a
+    runner mid-inference, by the powerdown reset the loader issues, and
+    sometimes simply by a completed validate run. THE LOAD LOG IS MISLEADING -
+    the real cause is only in `n6_loader.log`. It cost a measurement slot
+    (convfsenet_head_fwd was never measured) and it hit both a band graph and
+    the LiSenNet relu6-deep model, so it is entirely independent of the graph.
+    """
+cause         = """
+    The ST-LINK connection forwarded from Windows through usbipd drops on the
+    powerdown reset (or is left in an unusable USB endpoint state by a killed
+    runner), so gdb cannot reconnect.
+    """
+workaround    = """
+    Check `n6_loader.log`, not just the load log. Kill any stale
+    `ST-LINK_gdbserver` first, then cycle the attachment: `usbipd detach --busid
+    <id>` then `usbipd attach --wsl --busid <id>` (the busid can change across
+    replug). If the wedge follows a `validate` run, PHYSICALLY re-plug the USB -
+    an SWD software reset does NOT clear it. Never kill runners mid-inference.
+    Any failure recorded while the probe is wedged must be DISCARDED, never
+    attributed to the model.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/EFFICIENCY_REWORK_PLAN.md"]
+
+[[issue]]
+id            = "usbipd-attach-required-and-busid-changes"
+failure_class = "USBIPD_ATTACH_FAILURE"
+stage         = "board"
+zoo_action    = "infra-retry"
+title         = """
+    INFRA: the board must be re-attached to WSL with the Windows usbipd binary
+    after every replug, and the busid moves
+    """
+error_signature = "ST-Link enumeration failed"
+symptom       = """
+    The board is invisible to every tool inside WSL until the attach is re-run;
+    `usbipd` is not found from inside WSL; or an attach silently targets the
+    wrong device because the bus id moved (1-1 -> 1-2) after a physical replug.
+    Related tool-side symptom: \"ST-Link enumeration failed\". Combined with the
+    ST-LINK wedge (whose only cure is a replug) this must be redone constantly.
+    """
+cause         = """
+    WSL does not automatically re-attach USB devices after a physical replug;
+    only the Windows-side executable exists (`/mnt/c/Program
+    Files/usbipd-win/usbipd.exe`) - bare `usbipd`/`usbipd.exe` are not on the
+    WSL PATH; and bus ids are assigned per physical port/enumeration and are not
+    stable.
+    """
+workaround    = """
+    Always call the full Windows path and re-run `usbipd.exe list` after any
+    replug to re-read the busid, then `usbipd.exe attach --wsl --busid <id>`
+    from Windows before any stedgeai/ai_runner invocation. On \"ST-Link
+    enumeration failed\", do a usbipd detach + attach cycle.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md"]
+
+[[issue]]
+id            = "busy-loop-idle-baseline-inflates-energy"
+failure_class = "SILENT_INVALID_POWER_BASELINE"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: the firmware's 'idle' power baseline is a busy loop, so every
+    published energy delta uses the wrong reference
+    """
+symptom       = """
+    No error; the power capture completes and yields clean, quotable mW /
+    uJ-per-inference figures. But the baseline phase is not idle, so the deltas
+    are wrong - the giveaway is that `matched - idle` comes out NEGATIVE (-13.6
+    / -11.2 mW). Numbers derived this way were quoted externally before the flaw
+    was found.
+    """
+cause         = """
+    The 'idle' phase is `pwr_spin()`, a `while (HAL_GetTick()-t0 < ms)` busy
+    loop, and the UTIA matched-duration wait polls `DWT->CYCCNT`. Neither parks
+    the core; they differ by 11-14 mW purely in what the M55 polls. Real
+    inference meanwhile parks the M55 in WFE, so the active and baseline phases
+    differ in MCU behaviour as well as in NPU work.
+    """
+workaround    = """
+    Quote absolute energy on the UTIA matched-wait basis (it at least holds the
+    loop structure fixed) and describe the 0.9144 W figure as 'loaded baseline,
+    MCU spinning', not 'idle'. A true idle requires a WFI/WFE phase in the
+    firmware. Within-firmware ratios (nb 4 vs nb 8) remain valid because both
+    use identical baselines.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+
+[[issue]]
+id            = "calibration-set-size-changes-compiled-latency"
+failure_class = "SILENT_CALIBRATION_DEPENDENT_COMPILE"
+stage         = "quantize"
+zoo_action    = "document-only"
+title         = """
+    SILENT: calibration set size changes the compiled epoch count and on-board
+    latency
+    """
+symptom       = """
+    Two int8 exports of the same architecture compile and run cleanly but land
+    at different epoch counts and different latencies (86 epochs / 15.485 ms vs
+    88 epochs / 14.172 ms for monarch_full, CM55 software-target durations)
+    purely because of how many utterances were used for PTQ calibration. Nothing
+    warns that the two rows are not comparable.
+    """
+cause         = """
+    Calibration changes the quantization scales, which changes how the compiler
+    partitions and fuses the graph, which changes the epoch structure and
+    therefore latency.
+    """
+workaround    = """
+    Pin and record the calibration recipe (utterance count, method) per
+    artifact, never mix calibration regimes in one comparison table, and
+    re-measure any row whose calibration differs. Epoch count only exists after
+    a compile, so this cannot be predicted from the ONNX.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md"]
+
+[[issue]]
+id            = "export-lint-under-approximates-compiler"
+failure_class = "LINT_FALSE_NEGATIVE"
+stage         = "lint"
+zoo_action    = "document-only"
+title         = """
+    SILENT: a clean export-time device lint is not a compile verdict - every
+    graph that passed still needed patching
+    """
+symptom       = """
+    `verify.check_device_constraints` passes every artifact, yet all six
+    graph-patch classes above were still required, and the fused loss graph went
+    on to hang at firmware level. A green lint gives false confidence that the
+    model is deployable.
+    """
+cause         = """
+    The lint had never been cross-checked against an actual compile; its
+    op/constraint model under-approximates ST Edge AI 4.0.1's front end. This is
+    a property of the repo's OWN tooling - neither a model defect nor a board
+    problem - and should not be filed as either.
+    """
+workaround    = """
+    Treat lint as a cheap pre-filter only; the authoritative gates are `stedgeai
+    generate` (front end + atonn) and an on-target run. Every lint rule should
+    be back-filled from an OBSERVED compile failure - which is exactly what the
+    statically-detectable records at the top of this catalogue are for.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "int8-tie-routing-gradient-nondeterminism"
+failure_class = "NONDETERMINISTIC_INT8_GRADIENT"
+stage         = "quantize"
+zoo_action    = "document-only"
+title         = """
+    SILENT: the int8 gradient is not a function of its input - 5-50% of
+    identical reruns diverge, worst cosine 0.036
+    """
+symptom       = """
+    Rerunning the same quantized graph on the same audio across fresh sessions
+    and thread counts, 5-50% of executions diverge; when they do the gradient
+    can be nearly unrelated to the previous one (worst observed cosine 0.036,
+    norm ratio 27x) while the score stays within 0.07 MOS. The divergence rate
+    climbs with machine load. fp32 never does this (last-ULP only, cosine
+    1.000). Effect on a downstream metric: re-running an identical int8 arm
+    moved its mean by 0.012 (+0.385 -> +0.397). Nothing errors, and the score -
+    the value most people check - looks stable while the derivative is
+    unrelated.
+    """
+cause         = """
+    Tie routing. int8 collapses many activations onto the same code, so a max
+    pool's argmax becomes a large tie set and the backward decides membership
+    with an Equal against the pooled value; one ULP of reduction-order
+    difference moves elements in and out and redirects gradient mass wholesale.
+    Thread scheduling sets reduction order, which is why the rate tracks machine
+    load. This is also why int8 gradient cosine plateaus near 0.5 no matter how
+    much of the graph is held float. NOT infra: host load only modulates a
+    property of the model. Measured on the host under ORT; no on-target rate is
+    asserted.
+    """
+workaround    = """
+    Pin --threads 1 for reproducible runs and do not evaluate under concurrent
+    load. Use an averaging optimizer (Adam over 30 steps absorbs the occasional
+    corrupted step; plain SGD would not). Never validate a device gradient
+    against a single host run, and expect on-target gradients to differ from any
+    desktop simulation by a comparable margin - so a gradient mismatch on target
+    is NOT by itself evidence of a compiler or runtime defect. Not statically
+    detectable: only 5-50% of executions diverge, so even a single rerun pair
+    can miss it; a static pass can at most flag the risk pattern (int8 QDQ +
+    global max pool + Equal-based backward mask routing).
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md"]
+
+[[issue]]
+id            = "mac-derived-latency-budget-unvalidated"
+failure_class = "ANALYTIC_ESTIMATE_NOT_A_VERDICT"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    SILENT: the feasibility screen rests on a MAC-derived latency model that was
+    never measured on target
+    """
+symptom       = """
+    The whole screening budget is analytic: one 9.01 s adaptation window;
+    ConvFSENet int8 at eco8's measured 4.40 ms/frame gives 2.48 s of enhancement
+    (564 frames), leaving 6.53 s, which at a measured 0.33-2.41 GMAC/s span is
+    2.2-15.7 GMAC for adaptation. Full fused fwd+bwd DNSMOS is 38.8 GMAC
+    (2.5-18x too slow) with a 70.8 MB activation peak against 2.8 MB on-chip /
+    32 MB PSRAM. Crop sweep: 2 s 8.6 GMAC / 3.91 MB (does not fit), 1 s 4.3 GMAC
+    / 1.95 MB (fits), 0.5 s 2.1 GMAC / 0.96 MB (fits). NONE of the timing was
+    measured on this project's board.
+    """
+cause         = """
+    Latency is MAC-derived from another project's measured throughput span
+    rather than measured on the STM32N6, and the on-chip memory claim assumes
+    the compiler fuses Q/DQ. A load-bearing detail: 4.40 ms/frame splits into
+    1.26 ms NPU core plus ~3.14 ms M55 epoch/state plumbing that does not scale
+    with width, so shrinking the enhancer 36x in MACs buys only ~7% of the frame
+    period - the floor is EPOCH-BOUND, and MAC-count screening will
+    systematically mispredict it.
+    """
+workaround    = """
+    Run `stedgeai validate --mode target` (and npu_profiler.py) on the
+    deployable ONNX before promoting an analytic budget to a verdict; the same
+    run settles both the memory peak and the latency model. Screen on MACs only
+    to eliminate candidates orders of magnitude out; never to rank candidates
+    within the epoch-bound floor. STALENESS: this run was since performed and
+    its results supersede the analytic model - trunk 31.75 ms per emit_T=64
+    window (0.50 ms/frame, RTF 0.031, X-cross cos 0.988), DNSMOS forward 1 s
+    crop 528.2 ms/window (RTF 0.53), loss graph 23.3 MB activations and hanging.
+    The 4.40 ms figure is eco8's, not this board's (this project measures 4.24
+    ms trunk / 0.50 ms/frame streaming).
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md"]
+
+[[issue]]
+id            = "power-via-stock-validate-measures-uart-energy"
+failure_class = "SILENT_TRANSPORT_DOMINATED_MEASUREMENT"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: measuring power through the stock validate/ai_runner path
+    measures UART energy, not compute
+    """
+symptom       = """
+    The power capture runs and produces a delta, but at ~1.0 s per invoke for
+    4.4 ms of compute (0.5% duty) the delta is the VCP transfer, not the
+    network. Nothing in the tool indicates the measurement is invalid.
+    """
+cause         = """
+    `stedgeai validate --mode target` and `stm_ai_runner` round-trip every
+    tensor over the 921600-baud VCP; a 10-tensor streaming model (feature + 9
+    TCM FIFO state buffers) moves ~65 kB per inference each way. `PERF_ONLY` /
+    `CONST_VALUE` runner modes do NOT bypass the transfer.
+    """
+workaround    = """
+    Use a custom firmware loop (a `power_loop()` between `aiValidationInit()`
+    and `aiValidationProcess()`) that drives LL_ATON directly with zero UART
+    traffic inside the measured window, and emit a fiducial pattern for offline
+    alignment. REMEMBER to restore the stock main.c afterwards or you get the
+    zero-networks failure (see power-loop-firmware-binds-zero-networks).
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+
+[[issue]]
+id            = "serial-fed-states-zero-point-anomaly"
+failure_class = "VALIDATION_HARNESS_ARTIFACT"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: feeding states over the serial validation protocol diverges
+    at the int8 zero-point (cos 0.73)
+    """
+symptom       = """
+    Pushing state tensors to the device over the ai_runner serial protocol and
+    reading them back gives cosine 0.73 when the state buffers sit at the int8
+    zero-point (constant -128), versus 0.95-0.97 at random/0 constants on the
+    same real frame - while the same graph in ORT matches the deployable
+    artifact at 0.998 everywhere. It looks exactly like a model fidelity failure
+    and is not one.
+    """
+cause         = """
+    OPEN QUESTION, localized to the host/firmware side: ai_runner packing versus
+    in-place buffer aliasing in the validation firmware (the source explicitly
+    calls the root cause an open question, so this is a hypothesis). In
+    deployment, states never cross the serial link - they persist in the aton
+    runtime's in-place buffers.
+    """
+workaround    = """
+    Never record a serial-state-fed cosine as a model verdict; host-threaded
+    on-device states are NOT a valid fidelity probe. The deployment-relevant
+    fidelity number is the host threaded-state measurement (0.998). Reproduction
+    is scripted in the session notes.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "single-clip-screen-below-noise-floor"
+failure_class = "VALIDATION_PROTOCOL_NOISE_FLOOR"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    SILENT: the single-clip screening protocol's noise floor exceeded the
+    effects it ranked - it returned an impossible result
+    """
+symptom       = """
+    At the 1 s crop the single-clip, single-seed, 30-step screen reported that
+    the int8 build beat its own fp32 build by 17% (+0.328 vs +0.281) -
+    impossible, since quantization cannot improve the gradient it approximates.
+    Re-running paired over 7 gradient sources x 30 clips x 2 head
+    initializations (420 adaptations, every arm on the identical clip/init list)
+    INVERTED the exclusion ladder: with one clip exclude=0 looked best, with 60
+    pairs exclude=2 is better by +0.027 [+0.011, +0.042]. The screen also
+    mis-stated int8 retention as 69% where the paired number is 83% (2 s) and
+    86% (1 s). Every wrong answer was returned without any error or warning.
+    """
+cause         = """
+    The screening instrument's variance exceeded the effect sizes it was being
+    used to rank. The impossible int8-beats-fp32 result was the tell.
+    """
+workaround    = """
+    Rank variants only with the paired multi-clip evaluation
+    (adaptation_eval.py: same clips, same inits, report mean/sd/95% CI and
+    percent-of-clips-improved); treat the single-clip crop_study.py delta as a
+    smoke test only. Build an IMPOSSIBILITY CHECK into the screen - an arm that
+    outperforms its own fp32 reference is a protocol failure, not a result. Note
+    the CIs cover clip and initialization sampling only, NOT execution
+    nondeterminism, which int8 arms carry on top.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md"]
+
+[[issue]]
+id            = "untrained-or-wrong-checkpoint-measured"
+failure_class = "SILENT_WRONG_WEIGHTS_PROVENANCE"
+stage         = "fetch"
+zoo_action    = "document-only"
+title         = """
+    SILENT: latency measured from a compile-proof / random-weight checkpoint
+    that is not the trained model
+    """
+symptom       = """
+    Compile, load and validate all succeed and produce correct-looking latency,
+    epoch and MACC numbers. The weights, however, are re-initialised or belong
+    to a different (compile-proof) checkpoint, so every quality figure attached
+    to that row is meaningless while the timing looks authoritative. Concrete
+    instances: the local `cp_lisennet_conv_hardened/g_best` is NOT the trained
+    nc20 (torch FP32 2.198 vs the study's 2.895) but a July-1 compile-proof
+    checkpoint; the nblocks-20 point uses an UNTRAINED random-weight checkpoint.
+    """
+cause         = """
+    Latency and epoch count are weight-independent, so nothing in the toolchain
+    flags the substitution. Checkpoints never published from the training box,
+    and synthetic/untrained rungs added to sweep a structural parameter, sit in
+    the same `cp_*/g_best` layout as trained ones.
+    """
+workaround    = """
+    Record checkpoint provenance (and a weight hash / host FP32 metric)
+    alongside every board measurement, and mark rows whose weights are not the
+    trained artifact. Quote latency from such rows ONLY - never accuracy/PESQ.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md"]
+
+[[issue]]
+id            = "validate-vs-profiler-latency-offset"
+failure_class = "SILENT_CROSS_METHOD_LATENCY_BIAS"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: validate and npu_profiler latencies are not interchangeable
+    (~1 ms offset)
+    """
+symptom       = """
+    Both tools succeed and report per-inference latency; mixing them in one
+    table silently biases rows measured by `validate` upward by roughly 1 ms
+    relative to `npu_profiler`'s pure-inference figure. This actually happened:
+    a native-dilation experiment was compared at 5.42 ms (validate) against a
+    4.40 ms baseline (profiler).
+    """
+cause         = """
+    `validate`'s `duration ... by sample` includes host/protocol overhead that
+    the profiler's pure-inference measurement excludes. A host
+    measurement-method property, not a model property.
+    """
+workaround    = """
+    Record the measurement METHOD with every latency number and only compare
+    like-for-like.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md"]
+
+[[issue]]
+id            = "ai-runner-numpy2-and-serial-timeout"
+failure_class = "HOST_TOOL_INCOMPATIBILITY"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA: ai_runner is broken under numpy>=2 and times out on slow graphs at 50
+    s per message
+    """
+symptom       = """
+    Two host-side breakages that look like device failures: `ai_runner` uses the
+    numpy-2-removed `np.fromstring`, and the serial protocol's 50 s per-message
+    timeout aborts runs on graphs slow enough to exceed it.
+    """
+cause         = """
+    Stale host tooling in the stedgeai install; nothing to do with the compiled
+    model.
+    """
+workaround    = """
+    Patch `np.fromstring` -> `np.frombuffer`, and raise the per-message timeout
+    in `AiPbMsg._waiting_answer` before running slow graphs.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "cm55-memory-pool-mismatch-signature-check"
+failure_class = "CMODEL_SIGNATURE_MISMATCH"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    INFRA: CM55 software-target validate fails the C-model signature check
+    unless given the same --memory-pool as generate
+    """
+symptom       = """
+    On the CM55 (software) arm, `stedgeai validate` fails the C-model signature
+    check on activation size when its `--memory-pool` differs from the one used
+    at generate time.
+    """
+cause         = """
+    A host CLI-invocation mismatch between two stedgeai calls, not a property of
+    the model. (The mechanism - generate records the activation layout from the
+    pool and validate re-derives it - is inference; the source states only that
+    the signature check fails on activation size.)
+    """
+workaround    = """
+    Pass the IDENTICAL `--memory-pool` to both generate and validate. Note
+    `--c-api legacy` is mandatory for this arm, along with `--binary --address`.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md"]
+
+[[issue]]
+id            = "deployed-artifact-lost-in-tmp"
+failure_class = "ARTIFACT_PROVENANCE_LOSS"
+stage         = "fetch"
+zoo_action    = "document-only"
+title         = """
+    INFRA: deployed ONNX and ELF artifacts kept in /tmp are cleared, destroying
+    the provenance of published numbers
+    """
+symptom       = """
+    A published on-board result (2.13 ms/frame, 0.72 MB on-chip) cannot be
+    re-measured or re-verified because the exact prepared ONNX no longer exists;
+    the on-disk checkpoints of the same name fail at `stedgeai generate`.
+    Re-deriving the artifact risks silently attributing a new model's numbers to
+    the old row.
+    """
+cause         = """
+    Intermediate prepared artifacts (quantized ONNX, `Project.elf`) were written
+    under /tmp, which is cleared on reboot, while the repo kept only the
+    unprepared checkpoints.
+    """
+workaround    = """
+    Copy every artifact that produced a quoted number out of /tmp into the repo
+    (or an artifacts/ dir with its `network_generate_report.txt`), as
+    npu_structure_bench later did. When re-deriving, verify byte-identity of the
+    compile by checking MACC and epoch counts against the recorded values (a
+    LiSenNet nc24 example: 1,299,086 MACC / 131 epochs re-measured 11 days
+    later).
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "fnb58-interrupt-out-fails-over-usbip"
+failure_class = "USBIP_INTERRUPT_ENDPOINT_FAILURE"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA: the USB power meter cannot be driven from WSL2/usbip - interrupt-OUT
+    transfers always time out
+    """
+error_signature = "vhci_hcd: urb->status -104"
+symptom       = """
+    Control transfers to the FNB58 succeed (descriptors, product string) and
+    reads on EP 0x83 return real packets, but every interrupt-OUT write times
+    out with the kernel logging `vhci_hcd: urb->status -104` (ECONNRESET)
+    continuously, so the meter never starts streaming. `usbipd detach` leaves
+    the device in Windows' \"Device in error state\". Cost several hours and
+    produced an incorrect \"the meter is faulty\" conclusion that was later
+    retracted.
+    """
+cause         = """
+    usbip does not carry the interrupt-OUT endpoint reliably for this device,
+    and the start command must arrive on that endpoint (an HID SET_REPORT
+    substitute over the control pipe is accepted, reporting 64 bytes written,
+    but does not start the stream).
+    """
+workaround    = """
+    Drive the meter natively on Windows and keep usbip out of the path; the
+    working call is `HidD_SetOutputReport` (Windows HID SET_REPORT with the
+    report-ID byte), NOT `FileStream.Write` or libusb interrupt OUT. NEVER call
+    `usb.set_configuration()` on this meter - it triggers a USB reset into the
+    \"descriptor request failed\" state recoverable only by physical replug.
+    Windows logs the CSV while WSL flashes/runs/analyses; the firmware fiducial
+    aligns the two without a shared clock.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+
+[[issue]]
+id            = "gcc-path-hardcoded-windows-error-127"
+failure_class = "HOST_TOOLCHAIN_PATH_ERROR"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA: armgcc/Makefile hardcodes a Windows GCC_PATH, so any build that
+    actually links dies with Error 127
+    """
+error_signature = "Error 127"
+symptom       = """
+    The firmware build invoked by `n6_loader.py` / `cm55_loader.py` fails with
+    `Error 127` (command not found) at link time. Dormant and invisible until
+    something forces a relink - earlier loads appeared to work only because
+    nothing needed relinking (restoring a swapped main.c is one such trigger).
+    """
+cause         = """
+    Line 1 of both `NPU_Validation/armgcc/Makefile` and
+    `CM55_Validation/armgcc/Makefile` sets `GCC_PATH ?=
+    \"/c/Users/foobar/TOOLS/gcc-arm-none-eabi/12.2 rel1/bin\"`, a Windows path
+    that does not exist in WSL, and neither loader overrides it. Trivially
+    preventable - it is a one-line grep of the Makefile.
+    """
+workaround    = """
+    Export GCC_PATH for both loaders, e.g.
+    `GCC_PATH=/home/claroche/opt/st/stm32cubeclt_1.21.0/GNU-tools-for-STM32/bin
+    python3 n6_loader.py --config config.json -nf <net>/network.c -bc N6-DK`;
+    bake the export into any measurement script (n6_tol12/measure_all.sh does
+    this).
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md"]
+
+[[issue]]
+id            = "gdbserver-port-collision-61234"
+failure_class = "HOST_PORT_COLLISION"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA: the default gdbserver port 61234 collides with a VS Code listener
+    under WSL mirrored networking
+    """
+symptom       = """
+    Board loads fail because the ST gdbserver's default port 61234 is already
+    bound by a VS Code listener on the Windows side, which mirrored networking
+    makes visible inside WSL.
+    """
+cause         = "Host environment, not the model or the board."
+workaround    = """
+    Patch the port in `n6_utils_pkg/compilers.py` (set to 61245 in this stedgeai
+    install), or free the port on the Windows side.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "lint-false-positive-vs-compiler"
+failure_class = "LINT_FALSE_POSITIVE"
+stage         = "lint"
+zoo_action    = "document-only"
+title         = "The lint rejects ops the compiler accepts (InstanceNormalization)"
+symptom       = """
+    The repo lint flags `InstanceNormalization` as outside its op vocabulary and
+    would block deployment; the ST compiler accepted it and the model ran
+    correctly on `n6-noextmem` at 37.6 ms.
+    """
+cause         = """
+    The lint's op list is an approximation of the target vocabulary in BOTH
+    directions, not a derived one.
+    """
+workaround    = """
+    Do not let a lint rejection be a final verdict - attempt the compile before
+    rewriting a graph around a supposedly unsupported op, and prune the lint
+    list from observed compiler acceptance. (This is also why the ConvTranspose
+    'outside the device vocabulary' claim should be treated as an assumption
+    until a compile attempt is recorded.) Establishing that the compiler ACCEPTS
+    an op necessarily requires running the compiler.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "ll-aton-middleware-version-mismatch"
+failure_class = "STALE_RUNTIME_MIDDLEWARE"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA: the app's bundled ll_aton middleware is version-locked to the
+    stedgeai that generated network.c
+    """
+error_signature = "Possible mismatch in ll_aton library used"
+symptom       = """
+    `make build` warns \"Possible mismatch in ll_aton library used\" when the
+    app's bundled NPU middleware version does not match the ST Edge AI Core
+    version that generated network.c.
+    """
+cause         = """
+    `STM32N6-GettingStarted-Audio` ships an `ll_aton` locked to stedgeai 4.0.0
+    while the generator installed here is 4.0.1; generator and runtime must
+    agree. In practice 4.0.x was accepted and the source heads the section
+    'largely resolved'.
+    """
+workaround    = """
+    Keep generator and app on the same major/minor (4.0.x was accepted here), or
+    refresh the app's `ll_aton` per ST's \"update project with a new version of
+    ST Edge AI Core\" procedure, or check out an app tag built with the matching
+    version.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/README.md"]
+
+[[issue]]
+id            = "per-channel-int32-bias-adjustment-trips"
+failure_class = "PER_CHANNEL_BIAS_SCALE_MISMATCH"
+stage         = "quantize"
+zoo_action    = "document-only"
+title         = """
+    ORT's per-channel int32-bias scale adjustment trips on the whole-utterance
+    LiSenNet graph's biases
+    """
+symptom       = """
+    Static QDQ quantization of the non-windowed, non-streaming (whole-utterance)
+    LiSenNet graph fails inside ORT's per-channel int32-bias scale adjustment.
+    The verbatim exception text is not recorded; the repo works around it rather
+    than reporting it.
+    """
+cause         = """
+    Documented only as 'ORT's per-channel int32-bias scale adjustment trips on
+    this graph's biases' - the mechanism is not stated in any source and must
+    not be asserted. The windowed and streaming deploy graphs of the same model
+    quantize per-channel fine.
+    """
+workaround    = """
+    Quantize the whole-utterance graph with per_channel=False
+    (lisennet/quant_onnx.py main() takes that branch explicitly); keep
+    per_channel=True for the deploy-relevant windowed (feat_window) and
+    streaming (feat + state_i_in) graphs. Related observation: at ~37 K
+    parameters the int8 file is LARGER than fp32 (0.44 MiB vs 0.27 MiB) because
+    Q/DQ nodes, scale/zero-point initializers and int32 biases outweigh the
+    weight saving.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/lisennet/quant_onnx.py", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md"]
+
+[[issue]]
+id            = "power-meter-inline-on-cn6-kills-stlink"
+failure_class = "POWER_RIG_BREAKS_DEBUG_LINK"
+stage         = "board"
+zoo_action    = "document-only"
+title         = "INFRA: inserting the USB power meter inline on CN6 kills ST-LINK enumeration"
+error_signature = "descriptor request failed"
+symptom       = """
+    With the FNB58 meter inline on CN6, Windows reports \"descriptor request
+    failed\" and the board is powered but nothing can talk to it (meter reads D+
+    3.09 V / D- 0.06 V, a full-speed idle pull-up with no host traffic).
+    """
+cause         = """
+    CN6 (USB-C, STLINK-V3EC) carries BOTH the board's 5 V and the debug link,
+    and the meter consumes the data lines for its own PC link, so the debug
+    enumeration is destroyed by the instrumentation itself.
+    """
+workaround    = """
+    Move JP2 to [3-4] = 5V_USB_SNK, feed board 5 V through the meter into CN8
+    (USB1), and connect the debugger straight to CN6. This also excludes the
+    STLINK-V3EC circuitry from the measured rail. Restore JP2 to [1-2] = STLK
+    afterwards.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+
+[[issue]]
+id            = "stlink-firmware-too-old-and-upgraded-over-usbipd"
+failure_class = "STALE_STLINK_FIRMWARE"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA: ST-LINK firmware below V3J17M11, and upgrading it over usbipd drops
+    the WSL attachment mid-flash
+    """
+error_signature = "JNI 0x1002"
+symptom       = """
+    `ST-LINK_gdbserver` refuses to work with an older ST-LINK firmware;
+    attempting the firmware upgrade from inside WSL over usbipd fails mid-flash
+    because the USB re-enumeration drops the forwarded attachment.
+    """
+cause         = """
+    The probe re-enumerates during its own firmware update; usbip cannot follow
+    the re-enumeration, so the transfer is cut. Board/host issue, nothing to do
+    with the model.
+    """
+workaround    = """
+    Upgrade ST-LINK firmware natively on the Windows host (STSW-LINK007 /
+    CubeProgrammer GUI), never through usbipd; require >= V3J17M11 before using
+    ST-LINK_gdbserver.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "validate-refuses-unfused-gemm-graph"
+failure_class = "FRONTEND_INTERNAL_ERROR"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    stedgeai validate re-runs ORT optimization, re-introduces the Gemm fusion
+    the export avoided, and crashes
+    """
+error_signature = "INTERNAL ERROR: Overwriting Entry 0 of _Mul_5_output_0"
+symptom       = """
+    A model that generates and runs on the board cannot be validated: `stedgeai
+    validate --mode target` crashes on the reference model. The workaround for
+    the activation-C Gemm blocker is therefore not measurable through validate
+    at all.
+    """
+cause         = """
+    The validate path runs ORT optimization on the reference ONNX internally,
+    re-creating the MatMulAddFusion / activation-C Gemm that
+    `skip_optimization=True` was used to prevent.
+    """
+workaround    = """
+    Do not use `validate` for un-fused models: load with n6_loader.py and
+    measure with `npu_profiler.py` against the already-loaded firmware, then
+    verify accuracy off-board (host ORT int8-vs-FP32 cosine) instead of via
+    validate's on-target cross-check. Predicting the crash means running ORT's
+    optimizer on the reference ONNX and looking for a re-created activation-C
+    Gemm - offline and ST-free, but not a pure schema lint.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "wsl2-nat-blocks-usbip-tcp-3240"
+failure_class = "HOST_NETWORK_BLOCKS_USBIP"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA: WSL2 NAT networking is blocked by the Windows firewall on the usbip
+    TCP-3240 link
+    """
+symptom       = """
+    The ST-LINK cannot be attached into WSL at all: the usbip link hits a
+    Windows-firewall TCP-3240 block when WSL2 is in the default NAT networking
+    mode.
+    """
+cause         = """
+    usbip runs over TCP port 3240; in NAT mode the Windows firewall blocks that
+    connection between the WSL VM and the Windows usbipd service.
+    """
+workaround    = """
+    Set WSL2 networking to mirrored in %UserProfile%\\.wslconfig ([wsl2]
+    networking=mirrored) and run `wsl --shutdown` to apply.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]

@@ -204,6 +204,18 @@ def macs(model: Any) -> int:
     """
     shapes = _shapes(model)
     initializers = {init.name: [int(d) for d in init.dims] for init in model.graph.initializer}
+
+    # In a QDQ graph a Conv's weight arrives through DequantizeLinear rather
+    # than as a direct initializer, so a lookup that only checks initializers
+    # finds nothing and the MAC count comes out zero — for a model that plainly
+    # has convolutions. Resolving one hop back through Q/DQ fixes it.
+    for node in model.graph.node:
+        if node.op_type in ("DequantizeLinear", "QuantizeLinear") and node.input and node.output:
+            source = node.input[0]
+            resolved = initializers.get(source) or (shapes.get(source, (None, 1))[0])
+            if resolved:
+                initializers.setdefault(node.output[0], resolved)
+
     total = 0
 
     for node in model.graph.node:

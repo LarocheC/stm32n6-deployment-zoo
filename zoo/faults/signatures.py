@@ -120,42 +120,102 @@ class KnownIssue:
     id: str
     failure_class: str
     title: str = ""
+    symptom: str = ""
     cause: str = ""
     workaround: str = ""
     patch: str = ""
     zoo_action: str = ""
+    stage: str = ""
+    error_signature: str = ""
     silent: bool = False
+    is_infra: bool = False
+    detectable_statically: bool = False
     sources: tuple[str, ...] = ()
 
 
-_KNOWN: dict[str, KnownIssue] | None = None
+_KNOWN: list[KnownIssue] | None = None
 
 
-def known_issues(path: Path | None = None, *, refresh: bool = False) -> dict[str, KnownIssue]:
-    """Catalogue keyed by failure class, loaded from `known_issues.toml`."""
+def known_issues(path: Path | None = None, *, refresh: bool = False) -> list[KnownIssue]:
+    """The catalogue, in file order (lint rules first, document-only last).
+
+    A list rather than a dict keyed by failure class: several distinct
+    constraints legitimately share a class, and collapsing them would throw
+    away the one that happened to be loaded second.
+    """
     global _KNOWN
     if _KNOWN is not None and not refresh:
         return _KNOWN
     target = path or KNOWN_ISSUES_PATH
-    issues: dict[str, KnownIssue] = {}
+    issues: list[KnownIssue] = []
     if target.is_file():
         with target.open("rb") as fh:
             doc = tomllib.load(fh)
         for entry in doc.get("issue", []):
-            issue = KnownIssue(
-                id=entry.get("id", ""),
-                failure_class=entry.get("failure_class", FC.UNKNOWN),
-                title=entry.get("title", ""),
-                cause=entry.get("cause", ""),
-                workaround=entry.get("workaround", ""),
-                patch=entry.get("patch", ""),
-                zoo_action=entry.get("zoo_action", ""),
-                silent=bool(entry.get("silent", False)),
-                sources=tuple(entry.get("sources", [])),
+            issues.append(
+                KnownIssue(
+                    id=entry.get("id", ""),
+                    failure_class=entry.get("failure_class", FC.UNKNOWN),
+                    title=" ".join(entry.get("title", "").split()),
+                    symptom=" ".join(entry.get("symptom", "").split()),
+                    cause=" ".join(entry.get("cause", "").split()),
+                    workaround=" ".join(entry.get("workaround", "").split()),
+                    patch=entry.get("patch", ""),
+                    zoo_action=entry.get("zoo_action", ""),
+                    stage=entry.get("stage", ""),
+                    error_signature=entry.get("error_signature", ""),
+                    silent=bool(entry.get("silent", False)),
+                    is_infra=bool(entry.get("is_infra", False)),
+                    detectable_statically=bool(entry.get("detectable_statically", False)),
+                    sources=tuple(entry.get("sources", [])),
+                )
             )
-            issues[issue.failure_class] = issue
     _KNOWN = issues
     return issues
+
+
+def by_failure_class(name: str) -> KnownIssue | None:
+    for issue in known_issues():
+        if issue.failure_class == name:
+            return issue
+    return None
+
+
+def match_catalogue(text: str) -> KnownIssue | None:
+    """Find the catalogue entry whose recorded error signature appears in `text`.
+
+    Substring, case-insensitive, longest signature first — a longer signature
+    is the more specific claim, and a generic one must not shadow it. These
+    strings were transcribed from real tool output and verified against their
+    sources, so a match here is worth far more than the hand-written regex
+    fallback below.
+    """
+    if not text:
+        return None
+    candidates = [i for i in known_issues() if i.error_signature]
+    for issue in sorted(candidates, key=lambda i: -len(i.error_signature)):
+        if _signature_pattern(issue.error_signature).search(text):
+            return issue
+    return None
+
+
+_SIG_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _signature_pattern(signature: str) -> re.Pattern[str]:
+    """Compile a catalogue signature, treating `*` as a wildcard.
+
+    Several signatures were transcribed with a `*` standing in for the part
+    that varies between runs — `value=Pad_*_constant_value` names a node whose
+    index differs every time. Matching them literally would mean those entries
+    never fire, which is worse than not having them: the atlas would show the
+    failure as unexplained while the explanation sat in the file.
+    """
+    cached = _SIG_CACHE.get(signature)
+    if cached is None:
+        cached = re.compile(re.escape(signature).replace(r"\*", r".*?"), re.I)
+        _SIG_CACHE[signature] = cached
+    return cached
 
 
 @dataclass
@@ -174,22 +234,42 @@ class Classification:
 
 
 def classify(text: str, *, default: str = FC.UNKNOWN) -> Classification:
-    """Fingerprint a failure and name it."""
+    """Fingerprint a failure and name it.
+
+    The catalogue is consulted first. Its signatures were transcribed from
+    real tool output and verified against their sources, so a hit there is
+    both more specific and better evidenced than the hand-written regex table,
+    and it carries a workaround.
+    """
     haystack = text or ""
+
+    issue = match_catalogue(haystack)
+    if issue is not None:
+        return Classification(
+            failure_class=issue.failure_class,
+            signature=fingerprint(haystack),
+            normalised=normalise(haystack),
+            # The catalogue's own judgement about whether this is the bench or
+            # the model, rather than a guess from the class name.
+            is_infra=issue.is_infra,
+            known_issue=issue.id,
+            workaround=issue.workaround,
+        )
+
     failure_class = default
     for pattern, klass in RULES:
         if pattern.search(haystack):
             failure_class = klass
             break
 
-    issue = known_issues().get(failure_class)
+    fallback = by_failure_class(failure_class)
     return Classification(
         failure_class=failure_class,
         signature=fingerprint(haystack),
         normalised=normalise(haystack),
-        is_infra=is_infra(failure_class),
-        known_issue=issue.id if issue else "",
-        workaround=issue.workaround if issue else "",
+        is_infra=is_infra(failure_class) or bool(fallback and fallback.is_infra),
+        known_issue=fallback.id if fallback else "",
+        workaround=fallback.workaround if fallback else "",
     )
 
 
