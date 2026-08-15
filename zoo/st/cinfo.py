@@ -55,7 +55,21 @@ class Epoch:
 @dataclass
 class CompileInfo:
     path: Path
+    #: `memory_footprint.weights`. Read the docstring on `param_bytes` before
+    #: quoting this as a model's weight size.
     weights_bytes: int = 0
+    #: Summed size of the buffers the compiler flags `is_param` — the actual
+    #: learned parameters. These two figures are not the same number, and the
+    #: gap is not small: face_detection_yunet has 186 parameter buffers at both
+    #: 320x320 and 640x640 — 77 KB and 80 KB — while `memory_footprint.weights`
+    #: reads 78 KB at 320 and 1,681 KB at 640, for the same 53,104 parameters.
+    #: So the footprint figure includes something that scales with input
+    #: resolution, which learned weights cannot. Where the two agree — as they
+    #: do for mobilenet_v2, which is what matched ST's published figure — the
+    #: distinction does not matter; where they disagree, `param_bytes` is the
+    #: one that means "how big is this model".
+    param_bytes: int = 0
+    param_buffers: int = 0
     activations_bytes: int = 0
     io_bytes: int = 0
     pools: list[Pool] = field(default_factory=list)
@@ -119,6 +133,8 @@ class CompileInfo:
     def metrics(self) -> dict[str, Any]:
         return {
             "weights_bytes": self.weights_bytes,
+            "param_bytes": self.param_bytes,
+            "param_buffers": self.param_buffers,
             "activations_bytes": self.activations_bytes,
             "io_bytes": self.io_bytes,
             "pool_placement": self.placement,
@@ -143,6 +159,10 @@ def parse(path: Path) -> CompileInfo:
     info.activations_bytes = int(footprint.get("activations") or 0)
     io = footprint.get("io") or []
     info.io_bytes = sum(int(v or 0) for v in io) if isinstance(io, list) else 0
+
+    params = [b for b in (doc.get("buffers") or []) if b.get("is_param")]
+    info.param_bytes = sum(int(b.get("size_bytes") or 0) for b in params)
+    info.param_buffers = len(params)
 
     for entry in doc.get("memory_pools") or []:
         info.pools.append(

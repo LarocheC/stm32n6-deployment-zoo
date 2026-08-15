@@ -140,6 +140,7 @@ zoo ops        the operator oracle
 zoo init       draft a recipe from a Hugging Face id
 zoo lint       static screen, with a remedy per violation
 zoo screen     the full board-free funnel over every recipe
+zoo measure    quantise, compile, and measure on the board
 zoo report     fold the event log into RESULTS.md
 ```
 
@@ -147,7 +148,16 @@ Built: toolchain discovery and pinning · operator oracle · ONNX probe (local
 and remote head-scan) · recipe schema and auto-drafter · fetch layer · results
 store and leaderboard · fault catalogue and classifier · static lint · graph
 patches with a parity gate · memory budget · funnel orchestration · static QDQ
-int8 quantisation with calibration providers.
+int8 quantisation with real-data calibration providers · the compile stage
+(`stedgeai generate`, `network_c_info.json`, predicted latency) · the board
+stage with a determinism gate.
 
-Next: the compile stage (`stedgeai generate`, parsing `network_c_info.json`),
-then the board stage. See `.claude/plans/` for the full plan.
+**Nothing enters the leaderboard on one measurement.** `zoo measure` reloads the
+firmware `min_loads` times, takes `invokes_per_load` samples per load, and reads
+a canary graph before each row to catch the bench moving. Every row carries the
+verdict that came out of that — trusted, unstable, insufficient, quarantined —
+and the leaderboard shows it, because a number without its evidence invites the
+reader to assume it is reproducible. See `docs/defensible-numbers.md`.
+
+Next: the firmware demos for promoted models. See `.claude/plans/` for the full
+plan.

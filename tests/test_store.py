@@ -157,3 +157,53 @@ def test_report_renders_without_a_board(tmp_path: Path) -> None:
     assert "## Leaderboard" in text
     assert "## Failure atlas" in text
     assert "40 (12H/0y/23S)" in text
+
+
+def test_a_latency_measured_before_a_requantise_is_marked_stale(tmp_path: Path) -> None:
+    """Re-quantising replaces the artifact; the old latency describes nothing.
+
+    The fold merges every stage's metrics into one row, which is what lets a
+    fresh calibration provenance sit beside a stale board number as though the
+    two came from the same model. They did not.
+    """
+    from zoo.store import report as rmod
+
+    log = EventLog(tmp_path / "events.jsonl")
+    log.append(_ev(Stage.QUANTIZE, Status.PASS, ts="2026-08-15T09:00:00Z",
+                   metrics={"int8_cos": 0.94, "calibration_synthetic": True}))
+    log.append(_ev(Stage.GENERATE, Status.PASS, ts="2026-08-15T09:05:00Z",
+                   metrics={"epochs_total": 40}))
+    log.append(_ev(Stage.BOARD, Status.PASS, ts="2026-08-15T10:00:00Z",
+                   metrics={"latency_ms_median": 10.15, "loads_ok": 3,
+                            "invokes_per_load": 10, "determinism_gate": "trusted",
+                            "latency_ms_cv": 0.004}))
+    def _row(snapshot) -> str:  # noqa: ANN001 - the leaderboard line, not the legend
+        return next(
+            line for line in rmod.render(snapshot).splitlines()
+            if line.startswith("| demo |")
+        )
+
+    assert "⧖ stale" not in _row(smod.fold(log))
+
+    # Same graph, re-quantised afterwards with real data.
+    log.append(_ev(Stage.QUANTIZE, Status.PASS, ts="2026-08-15T14:00:00Z",
+                   metrics={"int8_cos": 0.97, "calibration_synthetic": False}))
+    row = _row(smod.fold(log))
+    assert "⧖ stale" in row
+    # The number itself survives the annotation.
+    assert "10.15" in row
+
+
+def test_evidence_column_distinguishes_a_gated_row_from_a_single_shot(tmp_path: Path) -> None:
+    from zoo.store import report as rmod
+
+    log = EventLog(tmp_path / "events.jsonl")
+    log.append(_ev(Stage.BOARD, Status.PASS, graph_id="gated",
+                   metrics={"latency_ms_median": 1.0, "loads_ok": 3,
+                            "invokes_per_load": 10, "determinism_gate": "trusted",
+                            "latency_ms_cv": 0.004}))
+    log.append(_ev(Stage.BOARD, Status.PASS, graph_id="ungated",
+                   metrics={"latency_ms_median": 1.0}))
+    text = rmod.render(smod.fold(log))
+    assert "3x10 ✓ 0.4%" in text
+    assert "1x? ?" in text

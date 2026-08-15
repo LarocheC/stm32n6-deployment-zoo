@@ -90,3 +90,14 @@ calibrated on noise, and it should not be read as anything else.
 - Every number here is one load and one validate. The policy calls for 3 loads
   and 10 invokes before a row is trustworthy; that gate is not implemented yet,
   so treat these as first light rather than as the leaderboard's final word.
+
+  **Since superseded.** The gate is implemented — 3 reloads × 10 invokes, plus
+  an mnist-12 canary read before each row — and the leaderboard carries the
+  verdict it produced. The rows in the table above have not been re-measured
+  under it, because the ST-LINK wedged again before that pass could run. They
+  remain single-shot numbers until it is replugged. See `defensible-numbers.md`,
+  which also corrects two readings of this document: the ⚠ on handpose's
+  fidelity was understated (the *evaluation* inputs were noise as well as the
+  calibration ones), and the weights column above is the compiler's
+  `memory_footprint.weights`, which for yunet at 640 is 1,681 KB against 80 KB
+  of actual parameters.

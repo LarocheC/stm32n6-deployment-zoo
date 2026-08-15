@@ -92,6 +92,55 @@ def _ms_per_epoch(metrics: dict) -> str:
         return "—"
 
 
+_GATE_MARK = {
+    "trusted": "✓",
+    "unstable": "~",
+    "insufficient": "!",
+    "quarantined": "✗",
+}
+
+
+def _is_stale(state) -> bool:  # noqa: ANN001
+    """Was this latency measured against an artifact that has since changed?
+
+    Re-quantising or re-compiling produces a different `int8.onnx` and a
+    different `network.c`. A board number taken before either is a number for a
+    model that no longer exists — the same class of error as timing stale
+    firmware, one level up.
+    """
+    if state is None:
+        return False
+    board = state.stage_ts.get("board", "")
+    if not board:
+        return False
+    return any(
+        state.stage_ts.get(stage, "") > board for stage in ("quantize", "generate")
+    )
+
+
+def _evidence(metrics: dict, state=None) -> str:  # noqa: ANN001
+    """How much measurement stands behind the latency, in one cell.
+
+    A leaderboard that shows only a number invites the reader to assume it is
+    reproducible. This cell says how many reloads it survived and how far they
+    disagreed, so `3x10 ✓ 0.4%` and `1x4 !` are visibly different claims.
+    """
+    if not metrics.get("latency_ms_median"):
+        return "—"
+    stale = " ⧖ stale" if _is_stale(state) else ""
+    loads = metrics.get("loads_ok")
+    invokes = metrics.get("invokes_per_load")
+    if not loads:
+        # Measured before the gate existed: one load, one validate, no spread.
+        return "1x? ?" + stale
+    gate = metrics.get("determinism_gate", "")
+    cell = f"{loads}x{invokes} {_GATE_MARK.get(gate, '?')}"
+    cv = metrics.get("latency_ms_cv")
+    if cv is not None:
+        cell += f" {cv * 100:.1f}%"
+    return cell + stale
+
+
 def _speedup(variants: dict) -> str:
     """NPU vs Cortex-M55, when both backends were measured for one graph."""
     npu = m55 = None
@@ -135,11 +184,21 @@ def render(snap: Snapshot, *, recipes: dict | None = None) -> str:
         lines += ["  ·  ".join(parts), ""]
 
     lines += [
-        "> Fidelity numbers marked ⚠ come from synthetic calibration and are not",
-        "> meaningful as accuracy. Note also that ST's int8 realisation is not",
-        "> bit-compatible with ONNX Runtime's QDQ semantics — a measured case showed",
+        "> Fidelity numbers marked ⚠ were produced from fabricated data — either the",
+        "> scales were calibrated on noise, or the score itself was measured on noise —",
+        "> and are not meaningful as accuracy. Note also that ST's int8 realisation is",
+        "> not bit-compatible with ONNX Runtime's QDQ semantics — a measured case showed",
         "> cosine 0.996 alongside a systematic +0.23 mean bias — so on-device scores",
         "> must be recalibrated against the deployed artifact, never the host one.",
+        ">",
+        "> The **evidence** column is `loads×invokes`, then the determinism gate:",
+        "> `✓` trusted, `~` unstable (loads disagreed by more than policy allows),",
+        "> `!` insufficient (fewer loads than policy requires), `✗` quarantined (the",
+        "> bench canary moved). The percentage is the coefficient of variation across",
+        "> reloads — not across invokes within one load, which measures agreement with",
+        "> a possibly-stale firmware rather than reproducibility. `⧖ stale` means the",
+        "> row was quantised or compiled again *after* it was measured, so the latency",
+        "> belongs to an artifact that no longer exists.",
         "",
         "## Leaderboard",
         "",
@@ -147,9 +206,9 @@ def render(snap: Snapshot, *, recipes: dict | None = None) -> str:
 
     header = (
         "| model | graph | task | verdict | weights KB | act KB | pool | epochs | "
-        "ms | RTF | ms/epoch | NPU:M55 | int8 cos | profile | blocked at |"
+        "ms | evidence | RTF | ms/epoch | NPU:M55 | int8 cos | profile | blocked at |"
     )
-    lines += [header, "|" + "---|" * 15]
+    lines += [header, "|" + "---|" * 16]
 
     for graph in rows:
         best = graph.best
@@ -158,8 +217,14 @@ def render(snap: Snapshot, *, recipes: dict | None = None) -> str:
         task = getattr(recipe, "task", "") if recipe else ""
         profile = (best.variant_id.split("/")[0] if best and best.variant_id else "—")
         cos = metrics.get("ontarget_cos") or metrics.get("int8_cos")
-        synthetic = bool(metrics.get("calibration_synthetic"))
-        cos_cell = _num(cos, "{:.4f}") + (" ⚠" if synthetic and cos else "")
+        # ⚠ for a number produced from fabricated data — either because the
+        # scales were set on noise, or because the score itself was measured on
+        # noise. Both make the figure a smoke test rather than an accuracy.
+        fabricated = bool(metrics.get("calibration_synthetic")) or (
+            metrics.get("int8_cos") is not None
+            and not metrics.get("fidelity_real_inputs", True)
+        )
+        cos_cell = _num(cos, "{:.4f}") + (" ⚠" if fabricated and cos else "")
         lines.append(
             "| "
             + " | ".join(
@@ -168,13 +233,16 @@ def render(snap: Snapshot, *, recipes: dict | None = None) -> str:
                     graph.graph_id,
                     task or "—",
                     _VERDICT_MARK.get(graph.verdict, graph.verdict),
-                    # Compiler-reported first, analytic estimate as fallback.
-                    _kb(_pick(metrics, "weights_bytes", "quantised_weight_bytes",
-                              "weight_bytes")),
+                    # The compiler's parameter buffers first: `weights_bytes`
+                    # is a footprint that can include resolution-scaled data
+                    # which is not the model's weights at all.
+                    _kb(_pick(metrics, "param_bytes", "weights_bytes",
+                              "quantised_weight_bytes", "weight_bytes")),
                     _kb(_pick(metrics, "activations_bytes", "peak_activation_fused")),
                     str(_pick(metrics, "pool_placement", "placement") or "—"),
                     _epochs(metrics),
                     _num(metrics.get("latency_ms_median")),
+                    _evidence(metrics, best),
                     _num(metrics.get("rtf"), "{:.3f}"),
                     _ms_per_epoch(metrics),
                     _speedup(graph.variants),

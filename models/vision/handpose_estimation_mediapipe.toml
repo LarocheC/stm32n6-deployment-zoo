@@ -27,7 +27,7 @@ realtime_ms = 33.3   # one camera frame at 30 fps
   role  = "feature"
   shape = [1, 224, 224, 3]
   dtype = "float32"
-  calib = "synthetic"   # TODO: real images before any tier-2 promotion
+  calib = "image_folder"
 
   [[graph.output]]
   name = "Identity"
@@ -52,6 +52,14 @@ backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
 policy          = "first_success"
 
 [calibration]
-provider = "synthetic"   # TODO: a real provider is required for tier 2
+# opencv_zoo's mp_handpose.py preprocesses with BGR->RGB, resize, `blob / 255.`
+# and nothing else, so [0, 1] RGB — this provider's default, no options needed.
+#
+# The corpus is natural images, not hands: tiny-imagenet is what is available
+# locally, and its statistics (real edges, real colour distributions, real
+# dynamic range) are a far better stand-in for camera input than Gaussian noise.
+# It remains a domain mismatch, and a hand crop dataset would be better still.
+provider = "image_folder"
+dataset  = "~/datasets/tiny-imagenet-200/valid"
 n        = 128
 seed     = 0

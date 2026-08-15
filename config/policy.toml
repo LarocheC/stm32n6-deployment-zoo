@@ -80,10 +80,20 @@ quant_discard_ratio = 2.5
 # is stale firmware silently timing the *previous* model.
 min_loads = 3
 invokes_per_load = 10
-# Flag a row as unstable rather than trusting a tight-looking median.
+# Flag a row as unstable rather than trusting a tight-looking median. Applied
+# to the coefficient of variation ACROSS loads; the within-load spread that
+# `validate` prints for free is recorded separately, because ten invokes of one
+# possibly-wrong firmware can agree beautifully with each other.
 unstable_cv = 0.02
 # On-target vs host int8 cosine.
 ontarget_warn_cos = 0.98
+
+# The bench canary. Read once before each row, so a board that changed
+# mid-session is caught at the row it affected rather than inferred afterwards.
+# mnist-12 is the choice because it is the cheapest graph in the zoo to load
+# and its calibration is deliberately frozen: any movement in its number is
+# about the bench, not about the model.
+canary_model = "inference-engine-mnist-12"
 # Canary drift beyond this quarantines every result in the bracket.
 canary_drift_frac = 0.10
 

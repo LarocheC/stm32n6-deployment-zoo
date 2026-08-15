@@ -154,6 +154,130 @@ def pin_dims(model: Any, pin: dict[str, int]) -> tuple[Any, PatchResult]:
 # ---------------------------------------------------------------------------
 
 
+def retarget_input_resolution(
+    model: Any, shapes: dict[str, list[int]]
+) -> tuple[Any, PatchResult]:
+    """Re-resolve a statically shaped graph at a different input size.
+
+    The recommendation "re-export at 320x320" is, for a fully convolutional
+    network, usually not a re-export at all. The input dimension is a constant
+    in the file; every interior shape is derived from it by inference. Setting
+    the input and re-inferring produces exactly the graph the re-export would
+    have — without the training environment, the original weights repository,
+    or the export script, none of which the zoo has for a downloaded model.
+
+    It is not always safe, and the two ways it breaks are visible in the graph:
+
+    - a `Reshape` whose target shape is a *literal* rather than containing
+      `-1` will keep demanding the old resolution's element count;
+    - a `Resize` driven by `sizes` rather than `scales` pins an absolute
+      output size that no longer matches its input.
+
+    Both are checked here rather than discovered later as a shape-inference
+    error, because "this model cannot be re-resolutioned in place" is a useful
+    answer and a compiler backtrace is not. `face_detection_yunet` passes both
+    checks: 12 Reshapes all `[1, -1, k]`, 2 Resizes both on `scales`.
+
+    Stale `value_info` is dropped before inference. Leaving it is how a graph
+    ends up carrying the old resolution's interior shapes alongside the new
+    input — which infers cleanly, runs, and is wrong.
+    """
+    if not shapes:
+        return model, PatchResult(
+            "retarget_input_resolution", applied=False, note="no target shapes given"
+        )
+
+    blockers: list[str] = []
+    initializers = {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
+    for node in model.graph.node:
+        if node.op_type == "Reshape" and len(node.input) > 1:
+            target = initializers.get(node.input[1])
+            if target is not None and -1 not in target.tolist():
+                blockers.append(
+                    f"{node.name or node.op_type}: Reshape target {target.tolist()} is "
+                    "literal, so it is tied to the original resolution"
+                )
+        if node.op_type == "Resize" and len(node.input) > 3 and node.input[3]:
+            blockers.append(
+                f"{node.name or node.op_type}: Resize is driven by `sizes`, which pins "
+                "an absolute output resolution"
+            )
+    if blockers:
+        return model, PatchResult(
+            "retarget_input_resolution",
+            applied=False,
+            note="; ".join(blockers[:4]),
+            detail={"blockers": blockers},
+        )
+
+    out = copy.deepcopy(model)
+    by_name = {vi.name: vi for vi in out.graph.input}
+    before: dict[str, list[int]] = {}
+    for name, shape in shapes.items():
+        vi = by_name.get(name)
+        if vi is None:
+            return model, PatchResult(
+                "retarget_input_resolution",
+                applied=False,
+                note=f"{name!r} is not a graph input (inputs: {sorted(by_name)})",
+            )
+        dims = vi.type.tensor_type.shape.dim
+        before[name] = [int(d.dim_value) for d in dims]
+        if len(shape) != len(dims):
+            return model, PatchResult(
+                "retarget_input_resolution",
+                applied=False,
+                note=f"{name!r} has rank {len(dims)}, target {shape} has rank {len(shape)}",
+            )
+        for dim, value in zip(dims, shape, strict=True):
+            dim.ClearField("dim_param")
+            dim.dim_value = int(value)
+
+    # Every interior and output shape now has to be re-derived. Keeping the old
+    # ones would silently mix two resolutions in one file.
+    del out.graph.value_info[:]
+    for vi in out.graph.output:
+        vi.type.tensor_type.ClearField("shape")
+
+    try:
+        out = onnx.shape_inference.infer_shapes(out, strict_mode=True, data_prop=True)
+    except Exception as exc:  # noqa: BLE001
+        return model, PatchResult(
+            "retarget_input_resolution",
+            applied=False,
+            note=f"the graph does not re-infer at {shapes}: {type(exc).__name__}: {exc}",
+        )
+
+    unresolved = [
+        vi.name
+        for vi in out.graph.output
+        if not vi.type.tensor_type.shape.dim
+        or any(
+            not (d.HasField("dim_value") and d.dim_value > 0)
+            for d in vi.type.tensor_type.shape.dim
+        )
+    ]
+    if unresolved:
+        return model, PatchResult(
+            "retarget_input_resolution",
+            applied=False,
+            note=f"outputs did not resolve to static shapes at {shapes}: {unresolved}",
+            detail={"unresolved_outputs": unresolved},
+        )
+
+    note = "; ".join(f"{n} {before[n]} → {list(shapes[n])}" for n in shapes)
+    return out, PatchResult(
+        "retarget_input_resolution",
+        applied=True,
+        changed=len(shapes),
+        note=note,
+        detail={"from": before, "to": {k: list(v) for k, v in shapes.items()}},
+    )
+
+
+# ---------------------------------------------------------------------------
+
+
 def fold_const_inputs(model: Any, values: dict[str, Any]) -> tuple[Any, PatchResult]:
     """Turn named graph inputs into initializers holding a fixed value.
 

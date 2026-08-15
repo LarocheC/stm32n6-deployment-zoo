@@ -55,6 +55,14 @@ class QuantResult:
     calibration_samples: int = 0
     calibration_provider: str = "synthetic"
     calibration_is_real: bool = False
+    #: Where the real data came from, and what turned it into input tensors.
+    #: Recorded because "real calibration" is not one thing: which corpus and
+    #: which front end are both part of what the number means.
+    calibration_source: str = ""
+    calibration_preprocessor: str = ""
+    #: Whether the fidelity score below was measured on real data too.
+    fidelity_real_inputs: bool = False
+    fidelity_samples: int = 0
     #: Audit findings. Non-empty means the artifact is not deployable.
     audit_failures: list[str] = field(default_factory=list)
     op_counts: dict[str, int] = field(default_factory=dict)
@@ -81,6 +89,10 @@ class QuantResult:
             "calibration_provider": self.calibration_provider,
             "calibration_synthetic": not self.calibration_is_real,
             "calibration_samples": self.calibration_samples,
+            "calibration_source": self.calibration_source,
+            "calibration_preprocessor": self.calibration_preprocessor,
+            "fidelity_real_inputs": self.fidelity_real_inputs,
+            "fidelity_samples": self.fidelity_samples,
             "int8_cos": self.cosine,
             "int8_mae": self.mae,
             "int8_max_abs": self.max_abs,
@@ -152,10 +164,73 @@ def audit(model: Any, path: Path | None = None) -> tuple[list[str], dict[str, in
     return failures, counts
 
 
+@dataclass
+class Fidelity:
+    cosine: float | None = None
+    mae: float | None = None
+    max_abs: float | None = None
+    #: False when the comparison ran on fabricated inputs, whatever the
+    #: calibration used. A cosine measured on Gaussian noise says how the graph
+    #: behaves on Gaussian noise, and nothing more.
+    real_inputs: bool = False
+    samples: int = 0
+    note: str = ""
+
+
+def _eval_feeds(
+    provider: Any, specs: list[InputSpec], calibration: CalibrationSpec, samples: int
+) -> tuple[list[dict], bool, str]:
+    """Held-out inputs for the fidelity comparison.
+
+    Drawn from the calibration provider with a different seed, so the score is
+    not reported on the very samples whose min/max set the scales — a
+    quantiser graded on its own calibration set flatters itself. A real
+    provider that cannot produce more data falls back to synthetic, and says so
+    rather than quietly reverting to noise.
+    """
+    if not calibration.is_synthetic:
+        spec = calibration.derive(n=samples, seed=calibration.seed + 1)
+        try:
+            feeds = list(provider.batches(specs, spec))
+        except Exception as exc:  # noqa: BLE001 - fidelity must not kill the run
+            feeds = []
+            note = f"held-out {calibration.provider} data unavailable ({type(exc).__name__}: {exc})"
+        else:
+            note = ""
+        if feeds:
+            return feeds, True, ""
+        return (
+            _synthetic_feeds(specs, samples, calibration.seed + 1),
+            False,
+            note or f"{calibration.provider} yielded no held-out samples",
+        )
+    return _synthetic_feeds(specs, samples, calibration.seed + 1), False, ""
+
+
+def _synthetic_feeds(specs: list[InputSpec], samples: int, seed: int) -> list[dict]:
+    rng = np.random.default_rng(seed)
+    feeds = []
+    for _ in range(samples):
+        feed = {}
+        for item in specs:
+            if np.issubdtype(item.np_dtype, np.floating):
+                feed[item.name] = rng.standard_normal(item.shape).astype(item.np_dtype)
+            else:
+                feed[item.name] = rng.integers(0, 2, item.shape).astype(item.np_dtype)
+        feeds.append(feed)
+    return feeds
+
+
 def _fidelity(
-    fp32_path: Path, int8_path: Path, specs: list[InputSpec], samples: int = 8, seed: int = 0
-) -> tuple[float | None, float | None, float | None, str]:
-    """Cosine, MAE and max-abs of int8 against fp32 on the same inputs."""
+    fp32_path: Path,
+    int8_path: Path,
+    feeds: list[dict],
+    *,
+    real_inputs: bool = False,
+    note: str = "",
+) -> Fidelity:
+    """Cosine, MAE and max-abs of int8 against fp32 on the given inputs."""
+    result = Fidelity(real_inputs=real_inputs, note=note)
     try:
         import onnxruntime as ort
 
@@ -169,26 +244,22 @@ def _fidelity(
         a = ort.InferenceSession(str(fp32_path), options, providers=["CPUExecutionProvider"])
         b = ort.InferenceSession(str(int8_path), options, providers=["CPUExecutionProvider"])
     except Exception as exc:  # noqa: BLE001
-        return None, None, None, f"could not open both graphs: {type(exc).__name__}: {exc}"
+        result.note = f"could not open both graphs: {type(exc).__name__}: {exc}"
+        return result
 
-    rng = np.random.default_rng(seed)
     dots = norms_a = norms_b = 0.0
     abs_err = 0.0
     count = 0
     worst = 0.0
 
-    for _ in range(samples):
-        feed = {}
-        for item in specs:
-            if np.issubdtype(item.np_dtype, np.floating):
-                feed[item.name] = rng.standard_normal(item.shape).astype(item.np_dtype)
-            else:
-                feed[item.name] = rng.integers(0, 2, item.shape).astype(item.np_dtype)
+    for feed in feeds:
         try:
             out_a = a.run(None, feed)
             out_b = b.run(None, feed)
         except Exception as exc:  # noqa: BLE001
-            return None, None, None, f"execution failed: {type(exc).__name__}: {exc}"
+            result.note = f"execution failed: {type(exc).__name__}: {exc}"
+            return result
+        result.samples += 1
 
         for x, y in zip(out_a, out_b, strict=False):
             x = np.asarray(x, dtype=np.float64).ravel()
@@ -203,9 +274,12 @@ def _fidelity(
             count += x.size
 
     if not count or norms_a <= 0 or norms_b <= 0:
-        return None, None, None, "no comparable outputs"
-    cosine = dots / (np.sqrt(norms_a) * np.sqrt(norms_b))
-    return float(cosine), abs_err / count, worst, ""
+        result.note = "no comparable outputs"
+        return result
+    result.cosine = float(dots / (np.sqrt(norms_a) * np.sqrt(norms_b)))
+    result.mae = abs_err / count
+    result.max_abs = worst
+    return result
 
 
 def quantize(
@@ -228,6 +302,8 @@ def quantize(
 
     result = QuantResult(
         calibration_provider=calibration.provider,
+        calibration_source=calibration.source or "",
+        calibration_preprocessor=calibration.preprocessor or "",
     )
 
     fp32 = onnx.load(str(fp32_path))
@@ -287,13 +363,20 @@ def quantize(
     provider = get_provider(calibration.provider)
     result.calibration_is_real = bool(getattr(provider, "real_data", False))
     specs = specs_from_model(pre, roles)
-    reader = Reader(provider, specs, calibration)
+
+    # The reader has to be rebuilt per attempt — it is single-pass — but the
+    # one that is *counted* must be the one that was actually consumed, or the
+    # recorded sample count is a fresh reader's zero rather than evidence that
+    # any data reached the calibrator.
+    readers: list[Reader] = []
 
     def _run(per_ch: bool) -> None:
+        reader = Reader(provider, specs, calibration)
+        readers.append(reader)
         quantize_static(
             str(pre_path),
             str(out_path),
-            Reader(provider, specs, calibration),
+            reader,
             quant_format=QuantFormat.QDQ,
             activation_type=QuantType.QInt8,
             weight_type=QuantType.QInt8,
@@ -338,17 +421,33 @@ def quantize(
         result.error = f"quantize_static failed: {type(exc).__name__}: {exc}"
         return result
     finally:
-        result.calibration_samples = reader.count
+        result.calibration_samples = max((r.count for r in readers), default=0)
 
     quantised = onnx.load(str(out_path))
     result.path = out_path
     result.weight_bytes_after = _weight_bytes(quantised)
     result.audit_failures, result.op_counts = audit(quantised, out_path)
+    if not result.calibration_samples:
+        # An empty reader is not an error anywhere in ORT: the calibrator simply
+        # sees no data, keeps whatever ranges it started with, and returns a
+        # model. Every scale in it is then a default rather than a measurement.
+        result.audit_failures.append(
+            f"the calibration reader yielded no samples (provider "
+            f"{calibration.provider!r}, source {calibration.source!r}); "
+            "the activation ranges in this graph were never measured"
+        )
 
-    cosine, mae, worst, note = _fidelity(fp32_path, out_path, specs, seed=calibration.seed)
-    result.cosine, result.mae, result.max_abs = cosine, mae, worst
-    if note:
-        result.error = note
+    feeds, real_inputs, feed_note = _eval_feeds(provider, specs, calibration, samples=8)
+    fidelity = _fidelity(
+        fp32_path, out_path, feeds, real_inputs=real_inputs, note=feed_note
+    )
+    result.cosine, result.mae, result.max_abs = fidelity.cosine, fidelity.mae, fidelity.max_abs
+    result.fidelity_real_inputs = fidelity.real_inputs
+    result.fidelity_samples = fidelity.samples
+    if fidelity.note:
+        # A fidelity that could not be evaluated is a gap in the evidence, not
+        # a failed quantisation: the artifact may still be perfectly good.
+        result.notes.append(f"fidelity: {fidelity.note}")
 
     result.ok = not result.audit_failures
     return result
@@ -402,6 +501,11 @@ def summarise(results: Iterable[QuantResult]) -> str:
     for r in results:
         mark = "✓" if r.ok else "✗"
         cos = f"{r.cosine:.4f}" if r.cosine is not None else "—"
-        tag = "" if r.calibration_is_real else " ⚠ synthetic"
+        if not r.calibration_is_real:
+            tag = " ⚠ synthetic calibration"
+        elif not r.fidelity_real_inputs:
+            tag = " ⚠ scored on synthetic inputs"
+        else:
+            tag = f" ({r.calibration_provider})"
         lines.append(f"  {mark} cos={cos}{tag}  {r.error or ''}")
     return "\n".join(lines)

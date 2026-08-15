@@ -33,6 +33,14 @@ class VariantState:
     is_infra_last: bool = False
     metrics: dict = field(default_factory=dict)
     ts: str = ""
+    #: When each stage last passed. The fold merges every stage's metrics into
+    #: one row, which is what makes the leaderboard readable and also what lets
+    #: a stale board measurement sit next to a fresh quantisation as though the
+    #: two describe the same artifact. They do not: re-quantising produces a
+    #: different `int8.onnx`, and a latency taken before that is a latency for
+    #: a model that no longer exists. Keeping the timestamps lets the report
+    #: say so instead of quietly presenting the pair as one result.
+    stage_ts: dict = field(default_factory=dict)
 
     @property
     def rank(self) -> int:
@@ -150,6 +158,7 @@ def fold(events: list[Event] | EventLog) -> Snapshot:
                 vs.deepest_stage = ev.stage
             vs.metrics.update(ev.metrics or {})
             vs.ts = max(vs.ts, ev.ts)
+            vs.stage_ts[ev.stage] = max(vs.stage_ts.get(ev.stage, ""), ev.ts)
 
         # The earliest non-passing stage is where the funnel stopped.
         stopped = sorted(

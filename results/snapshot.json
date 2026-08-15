@@ -9,11 +9,17 @@
     "is_infra_last": false,
     "metrics": {
      "activations_bytes": 4588832,
+     "canary_drift": null,
+     "canary_ms": 0.104,
+     "canary_reference_ms": 0.104,
+     "determinism_gate": "trusted",
+     "determinism_reason": "3 loads x 10 invokes, across-load CV 0.00%",
      "ec_blobs": 0,
-     "epochs_hw": 49,
+     "epochs_hw": 50,
      "epochs_nox": 2,
      "epochs_sw": 0,
-     "epochs_total": 53,
+     "epochs_total": 54,
+     "invokes_per_load": 10,
      "io_bytes": 0,
      "ladder": [
       {
@@ -29,10 +35,22 @@
        "profile": "extram"
       }
      ],
-     "latency_ms": 161.606,
-     "latency_ms_median": 161.606,
-     "macc_total": 515788000,
-     "ontarget_cos": 0.999009,
+     "latency_ms_cv": 3.5255806912482833e-06,
+     "latency_ms_median": 163.76,
+     "latency_ms_per_load": [
+      163.76,
+      163.76,
+      163.761
+     ],
+     "latency_ms_within_load_cv": 2.8496925312855966e-05,
+     "loads_attempted": 3,
+     "loads_ok": 3,
+     "loads_required": 3,
+     "macc_total": 516402400,
+     "ontarget_cos": 0.968944,
+     "ontarget_input_source": "calibration-corpus",
+     "param_buffers": 186,
+     "param_bytes": 82348,
      "pool_placement": "activations-in-psram",
      "pools": {
       "cpuRAM2": 1048576,
@@ -43,15 +61,19 @@
       "npuRAM5": 458752,
       "npuRAM6": 442368
      },
-     "predicted_ms": 28.11384,
-     "predicted_vs_measured": 5.7482720254508095,
+     "predicted_ms": 30.46904,
+     "predicted_vs_measured": 5.374636023977126,
      "profile_used": "extram",
      "sw_epoch_ops": {},
      "weights_bytes": 1721632
     },
     "model_id": "face_detection_yunet",
     "signature": "",
-    "ts": "2026-08-15T12:11:26Z",
+    "stage_ts": {
+     "board": "2026-08-15T15:49:49Z",
+     "generate": "2026-08-15T15:24:12Z"
+    },
+    "ts": "2026-08-15T15:49:49Z",
     "variant_id": "extram/int8/in-f32/npu",
     "verdict": "MEASURED"
    },
@@ -69,17 +91,25 @@
       "applied": [],
       "audit_failures": [],
       "bytes": 232589,
-      "calibration_provider": "synthetic",
-      "calibration_samples": 0,
-      "calibration_synthetic": true,
+      "calibration_preprocessor": "",
+      "calibration_provider": "image_folder",
+      "calibration_samples": 128,
+      "calibration_source": "~/datasets/tiny-imagenet-200/valid",
+      "calibration_synthetic": false,
       "changed": 0,
       "dynamic_conditional": 0,
       "errors": 0,
+      "fidelity_real_inputs": true,
+      "fidelity_samples": 8,
       "folded_constants": [],
       "hf_revision": "main",
-      "int8_cos": 0.9978151404180724,
-      "int8_mae": 0.046907824093760084,
-      "int8_max_abs": 0.7203408479690552,
+      "int8_cos": 0.997427863210882,
+      "int8_mae": 0.04565536844623304,
+      "int8_max_abs": 1.1669936180114746,
+      "int8_peak_activation_fused": 8249360,
+      "int8_placement": "activations-in-psram",
+      "int8_quantised_weight_bytes": 59502,
+      "int8_unresolved_tensors": 0,
       "io_bytes": 5452800,
       "ir_version": 6,
       "is_quantised": false,
@@ -107,6 +137,7 @@
       "quantize_ops": 92,
       "rejected": [],
       "requested": [],
+      "resolution": {},
       "subgraph_nodes": 0,
       "suggested_patches": [],
       "unresolved_tensors": 0,
@@ -121,7 +152,16 @@
      },
      "model_id": "face_detection_yunet",
      "signature": "",
-     "ts": "2026-08-15T12:06:33Z",
+     "stage_ts": {
+      "budget": "2026-08-15T12:47:36Z",
+      "fetch": "2026-08-15T12:47:36Z",
+      "lint": "2026-08-15T12:47:36Z",
+      "patch": "2026-08-15T12:47:36Z",
+      "probe": "2026-08-15T12:47:36Z",
+      "quantize": "2026-08-15T15:23:52Z",
+      "shape": "2026-08-15T12:47:36Z"
+     },
+     "ts": "2026-08-15T15:23:52Z",
      "variant_id": "",
      "verdict": "QUANTIZES"
     },
@@ -133,11 +173,17 @@
      "is_infra_last": false,
      "metrics": {
       "activations_bytes": 4588832,
+      "canary_drift": null,
+      "canary_ms": 0.104,
+      "canary_reference_ms": 0.104,
+      "determinism_gate": "trusted",
+      "determinism_reason": "3 loads x 10 invokes, across-load CV 0.00%",
       "ec_blobs": 0,
-      "epochs_hw": 49,
+      "epochs_hw": 50,
       "epochs_nox": 2,
       "epochs_sw": 0,
-      "epochs_total": 53,
+      "epochs_total": 54,
+      "invokes_per_load": 10,
       "io_bytes": 0,
       "ladder": [
        {
@@ -153,10 +199,22 @@
         "profile": "extram"
        }
       ],
-      "latency_ms": 161.606,
-      "latency_ms_median": 161.606,
-      "macc_total": 515788000,
-      "ontarget_cos": 0.999009,
+      "latency_ms_cv": 3.5255806912482833e-06,
+      "latency_ms_median": 163.76,
+      "latency_ms_per_load": [
+       163.76,
+       163.76,
+       163.761
+      ],
+      "latency_ms_within_load_cv": 2.8496925312855966e-05,
+      "loads_attempted": 3,
+      "loads_ok": 3,
+      "loads_required": 3,
+      "macc_total": 516402400,
+      "ontarget_cos": 0.968944,
+      "ontarget_input_source": "calibration-corpus",
+      "param_buffers": 186,
+      "param_bytes": 82348,
       "pool_placement": "activations-in-psram",
       "pools": {
        "cpuRAM2": 1048576,
@@ -167,16 +225,247 @@
        "npuRAM5": 458752,
        "npuRAM6": 442368
       },
-      "predicted_ms": 28.11384,
-      "predicted_vs_measured": 5.7482720254508095,
+      "predicted_ms": 30.46904,
+      "predicted_vs_measured": 5.374636023977126,
       "profile_used": "extram",
       "sw_epoch_ops": {},
       "weights_bytes": 1721632
      },
      "model_id": "face_detection_yunet",
      "signature": "",
-     "ts": "2026-08-15T12:11:26Z",
+     "stage_ts": {
+      "board": "2026-08-15T15:49:49Z",
+      "generate": "2026-08-15T15:24:12Z"
+     },
+     "ts": "2026-08-15T15:49:49Z",
      "variant_id": "extram/int8/in-f32/npu",
+     "verdict": "MEASURED"
+    }
+   },
+   "verdict": "MEASURED"
+  },
+  {
+   "best": {
+    "blocked_by": "",
+    "deepest_stage": "board",
+    "failure_class": "",
+    "graph_id": "face-detection-yunet-2023mar-320",
+    "is_infra_last": false,
+    "metrics": {
+     "activations_bytes": 1166420,
+     "canary_drift": 0.0,
+     "canary_ms": 0.104,
+     "canary_reference_ms": 0.104,
+     "determinism_gate": "insufficient",
+     "determinism_reason": "1 of 3 required load(s) produced a measurement; abandoned after load 2: ST-LINK is wedged (DEV_USB_COMM_ERR). Neither an SWD reset nor a usbipd detach/attach clears this \u2014 physically unplug and replug the USB cable, then re-run. (Killing a runner mid-inference is the usual cause.)",
+     "ec_blobs": 0,
+     "epochs_hw": 48,
+     "epochs_nox": 2,
+     "epochs_sw": 0,
+     "epochs_total": 52,
+     "invokes_per_load": 10,
+     "io_bytes": 0,
+     "ladder": [
+      {
+       "ok": true,
+       "profile": "onchip"
+      }
+     ],
+     "latency_ms_cv": null,
+     "latency_ms_median": 6.343,
+     "latency_ms_per_load": [
+      6.343
+     ],
+     "latency_ms_within_load_cv": 0.0006306164275579379,
+     "loads_attempted": 2,
+     "loads_ok": 1,
+     "loads_required": 3,
+     "macc_total": 136120600,
+     "ontarget_cos": 0.858841,
+     "ontarget_input_source": "calibration-corpus",
+     "param_buffers": 186,
+     "param_bytes": 79145,
+     "pool_placement": "all-on-chip",
+     "pools": {
+      "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2732032,
+      "npuRAM3": 409600,
+      "npuRAM4": 449620,
+      "npuRAM5": 80017,
+      "npuRAM6": 307200
+     },
+     "predicted_ms": 5.150618,
+     "predicted_vs_measured": 1.2315027051122798,
+     "profile_used": "onchip",
+     "sw_epoch_ops": {},
+     "weights_bytes": 80017
+    },
+    "model_id": "face_detection_yunet",
+    "signature": "",
+    "stage_ts": {
+     "board": "2026-08-15T15:54:30Z",
+     "generate": "2026-08-15T15:50:00Z"
+    },
+    "ts": "2026-08-15T15:54:30Z",
+    "variant_id": "onchip/int8/in-f32/npu",
+    "verdict": "MEASURED"
+   },
+   "graph_id": "face-detection-yunet-2023mar-320",
+   "infra_events": 0,
+   "model_id": "face_detection_yunet",
+   "variants": {
+    "": {
+     "blocked_by": "",
+     "deepest_stage": "quantize",
+     "failure_class": "",
+     "graph_id": "face-detection-yunet-2023mar-320",
+     "is_infra_last": false,
+     "metrics": {
+      "applied": [],
+      "audit_failures": [],
+      "bytes": 232589,
+      "calibration_preprocessor": "",
+      "calibration_provider": "image_folder",
+      "calibration_samples": 128,
+      "calibration_source": "~/datasets/tiny-imagenet-200/valid",
+      "calibration_synthetic": false,
+      "changed": 1,
+      "dynamic_conditional": 0,
+      "errors": 0,
+      "fidelity_real_inputs": true,
+      "fidelity_samples": 8,
+      "folded_constants": [],
+      "hf_revision": "main",
+      "int8_cos": 0.9979088298894704,
+      "int8_mae": 0.04349901571087814,
+      "int8_max_abs": 0.5816810131072998,
+      "int8_peak_activation_fused": 2105360,
+      "int8_placement": "all-on-chip",
+      "int8_quantised_weight_bytes": 59502,
+      "int8_unresolved_tensors": 0,
+      "io_bytes": 1363200,
+      "ir_version": 6,
+      "is_quantised": false,
+      "macs": 86056000,
+      "max_rank": 4,
+      "max_tensor_dim": 6400,
+      "nodes": 106,
+      "ops_frontend_only": 0,
+      "ops_npu": 104,
+      "ops_sw": 2,
+      "ops_sw_unlocked": 2,
+      "ops_unsupported": 0,
+      "opset": 11,
+      "parity_unverified": [],
+      "peak_activation_fused": 3276800,
+      "peak_activation_raw": 3276800,
+      "per_channel": true,
+      "pinned": {},
+      "placement": "activations-in-psram",
+      "pre_patch_violations": [],
+      "quant_notes": [
+       "upgraded opset 11 -> 13 before quantising; per-channel DequantizeLinear needs the axis attribute, which opset 13 introduced"
+      ],
+      "quantised_weight_bytes": 212520,
+      "quantize_ops": 92,
+      "rejected": [],
+      "requested": [],
+      "resolution": {
+       "input": [
+        1,
+        3,
+        320,
+        320
+       ]
+      },
+      "subgraph_nodes": 0,
+      "suggested_patches": [],
+      "unresolved_tensors": 0,
+      "upgraded_opset_from": 11,
+      "violations": [],
+      "warnings": 0,
+      "weight_bytes": 212520,
+      "weight_bytes_fp32": 212520,
+      "weight_bytes_int8": 78862,
+      "weight_bytes_raw": 212520,
+      "weight_compression": 2.694834013846973
+     },
+     "model_id": "face_detection_yunet",
+     "signature": "",
+     "stage_ts": {
+      "budget": "2026-08-15T12:47:36Z",
+      "fetch": "2026-08-15T12:47:36Z",
+      "lint": "2026-08-15T12:47:36Z",
+      "patch": "2026-08-15T12:47:36Z",
+      "probe": "2026-08-15T12:47:36Z",
+      "quantize": "2026-08-15T15:49:51Z",
+      "shape": "2026-08-15T12:47:36Z"
+     },
+     "ts": "2026-08-15T15:49:51Z",
+     "variant_id": "",
+     "verdict": "QUANTIZES"
+    },
+    "onchip/int8/in-f32/npu": {
+     "blocked_by": "",
+     "deepest_stage": "board",
+     "failure_class": "",
+     "graph_id": "face-detection-yunet-2023mar-320",
+     "is_infra_last": false,
+     "metrics": {
+      "activations_bytes": 1166420,
+      "canary_drift": 0.0,
+      "canary_ms": 0.104,
+      "canary_reference_ms": 0.104,
+      "determinism_gate": "insufficient",
+      "determinism_reason": "1 of 3 required load(s) produced a measurement; abandoned after load 2: ST-LINK is wedged (DEV_USB_COMM_ERR). Neither an SWD reset nor a usbipd detach/attach clears this \u2014 physically unplug and replug the USB cable, then re-run. (Killing a runner mid-inference is the usual cause.)",
+      "ec_blobs": 0,
+      "epochs_hw": 48,
+      "epochs_nox": 2,
+      "epochs_sw": 0,
+      "epochs_total": 52,
+      "invokes_per_load": 10,
+      "io_bytes": 0,
+      "ladder": [
+       {
+        "ok": true,
+        "profile": "onchip"
+       }
+      ],
+      "latency_ms_cv": null,
+      "latency_ms_median": 6.343,
+      "latency_ms_per_load": [
+       6.343
+      ],
+      "latency_ms_within_load_cv": 0.0006306164275579379,
+      "loads_attempted": 2,
+      "loads_ok": 1,
+      "loads_required": 3,
+      "macc_total": 136120600,
+      "ontarget_cos": 0.858841,
+      "ontarget_input_source": "calibration-corpus",
+      "param_buffers": 186,
+      "param_bytes": 79145,
+      "pool_placement": "all-on-chip",
+      "pools": {
+       "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2732032,
+       "npuRAM3": 409600,
+       "npuRAM4": 449620,
+       "npuRAM5": 80017,
+       "npuRAM6": 307200
+      },
+      "predicted_ms": 5.150618,
+      "predicted_vs_measured": 1.2315027051122798,
+      "profile_used": "onchip",
+      "sw_epoch_ops": {},
+      "weights_bytes": 80017
+     },
+     "model_id": "face_detection_yunet",
+     "signature": "",
+     "stage_ts": {
+      "board": "2026-08-15T15:54:30Z",
+      "generate": "2026-08-15T15:50:00Z"
+     },
+     "ts": "2026-08-15T15:54:30Z",
+     "variant_id": "onchip/int8/in-f32/npu",
      "verdict": "MEASURED"
     }
    },
@@ -191,11 +480,17 @@
     "is_infra_last": false,
     "metrics": {
      "activations_bytes": 1404928,
+     "canary_drift": null,
+     "canary_ms": 0.104,
+     "canary_reference_ms": 0.104,
+     "determinism_gate": "trusted",
+     "determinism_reason": "3 loads x 10 invokes, across-load CV 0.01%",
      "ec_blobs": 0,
-     "epochs_hw": 50,
+     "epochs_hw": 51,
      "epochs_nox": 3,
      "epochs_sw": 0,
-     "epochs_total": 53,
+     "epochs_total": 54,
+     "invokes_per_load": 10,
      "io_bytes": 0,
      "ladder": [
       {
@@ -203,33 +498,49 @@
        "profile": "onchip"
       }
      ],
-     "latency_ms": 10.149,
-     "latency_ms_median": 10.149,
-     "macc_total": 173684231,
-     "ontarget_cos": 0.939775,
+     "latency_ms_cv": 5.6062495794397704e-05,
+     "latency_ms_median": 10.298,
+     "latency_ms_per_load": [
+      10.298,
+      10.299,
+      10.298
+     ],
+     "latency_ms_within_load_cv": 0.0003884123652740966,
+     "loads_attempted": 3,
+     "loads_ok": 3,
+     "loads_required": 3,
+     "macc_total": 173759495,
+     "ontarget_cos": 0.888108,
+     "ontarget_input_source": "calibration-corpus",
+     "param_buffers": 201,
+     "param_bytes": 1202802,
      "pool_placement": "all-on-chip",
      "pools": {
       "cpuRAM2": 1003520,
       "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2826240,
-      "npuRAM3": 285761,
+      "npuRAM3": 285969,
       "npuRAM4": 458738,
       "npuRAM5": 458738,
       "npuRAM6": 401408
      },
-     "predicted_ms": 7.447228,
-     "predicted_vs_measured": 1.36278894643752,
+     "predicted_ms": 7.5977559999999995,
+     "predicted_vs_measured": 1.3554001997431875,
      "profile_used": "onchip",
      "sw_epoch_ops": {},
-     "weights_bytes": 1203237
+     "weights_bytes": 1203445
     },
     "model_id": "handpose_estimation_mediapipe",
     "signature": "",
-    "ts": "2026-08-15T12:12:46Z",
+    "stage_ts": {
+     "board": "2026-08-15T14:22:02Z",
+     "generate": "2026-08-15T14:17:07Z"
+    },
+    "ts": "2026-08-15T14:22:02Z",
     "variant_id": "onchip/int8/in-f32/npu",
     "verdict": "MEASURED"
    },
    "graph_id": "handpose-estimation-mediapipe-2023feb",
-   "infra_events": 0,
+   "infra_events": 1,
    "model_id": "handpose_estimation_mediapipe",
    "variants": {
     "": {
@@ -242,17 +553,25 @@
       "applied": [],
       "audit_failures": [],
       "bytes": 4099621,
-      "calibration_provider": "synthetic",
-      "calibration_samples": 0,
-      "calibration_synthetic": true,
+      "calibration_preprocessor": "",
+      "calibration_provider": "image_folder",
+      "calibration_samples": 128,
+      "calibration_source": "~/datasets/tiny-imagenet-200/valid",
+      "calibration_synthetic": false,
       "changed": 0,
       "dynamic_conditional": 0,
       "errors": 0,
+      "fidelity_real_inputs": true,
+      "fidelity_samples": 8,
       "folded_constants": [],
       "hf_revision": "main",
-      "int8_cos": 0.999493282798598,
-      "int8_mae": 1.0988522783589596,
-      "int8_max_abs": 7.8245086669921875,
+      "int8_cos": 0.9996117951972509,
+      "int8_mae": 0.968413139397283,
+      "int8_max_abs": 10.516189575195312,
+      "int8_peak_activation_fused": 5258368,
+      "int8_placement": "activations-in-psram",
+      "int8_quantised_weight_bytes": 1057985,
+      "int8_unresolved_tensors": 0,
       "io_bytes": 602624,
       "ir_version": 7,
       "is_quantised": false,
@@ -292,7 +611,16 @@
      },
      "model_id": "handpose_estimation_mediapipe",
      "signature": "",
-     "ts": "2026-08-15T12:11:29Z",
+     "stage_ts": {
+      "budget": "2026-08-15T11:48:28Z",
+      "fetch": "2026-08-15T11:48:28Z",
+      "lint": "2026-08-15T11:48:28Z",
+      "patch": "2026-08-15T11:48:28Z",
+      "probe": "2026-08-15T11:48:28Z",
+      "quantize": "2026-08-15T14:16:58Z",
+      "shape": "2026-08-15T11:48:28Z"
+     },
+     "ts": "2026-08-15T14:16:58Z",
      "variant_id": "",
      "verdict": "QUANTIZES"
     },
@@ -304,11 +632,17 @@
      "is_infra_last": false,
      "metrics": {
       "activations_bytes": 1404928,
+      "canary_drift": null,
+      "canary_ms": 0.104,
+      "canary_reference_ms": 0.104,
+      "determinism_gate": "trusted",
+      "determinism_reason": "3 loads x 10 invokes, across-load CV 0.01%",
       "ec_blobs": 0,
-      "epochs_hw": 50,
+      "epochs_hw": 51,
       "epochs_nox": 3,
       "epochs_sw": 0,
-      "epochs_total": 53,
+      "epochs_total": 54,
+      "invokes_per_load": 10,
       "io_bytes": 0,
       "ladder": [
        {
@@ -316,28 +650,44 @@
         "profile": "onchip"
        }
       ],
-      "latency_ms": 10.149,
-      "latency_ms_median": 10.149,
-      "macc_total": 173684231,
-      "ontarget_cos": 0.939775,
+      "latency_ms_cv": 5.6062495794397704e-05,
+      "latency_ms_median": 10.298,
+      "latency_ms_per_load": [
+       10.298,
+       10.299,
+       10.298
+      ],
+      "latency_ms_within_load_cv": 0.0003884123652740966,
+      "loads_attempted": 3,
+      "loads_ok": 3,
+      "loads_required": 3,
+      "macc_total": 173759495,
+      "ontarget_cos": 0.888108,
+      "ontarget_input_source": "calibration-corpus",
+      "param_buffers": 201,
+      "param_bytes": 1202802,
       "pool_placement": "all-on-chip",
       "pools": {
        "cpuRAM2": 1003520,
        "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2826240,
-       "npuRAM3": 285761,
+       "npuRAM3": 285969,
        "npuRAM4": 458738,
        "npuRAM5": 458738,
        "npuRAM6": 401408
       },
-      "predicted_ms": 7.447228,
-      "predicted_vs_measured": 1.36278894643752,
+      "predicted_ms": 7.5977559999999995,
+      "predicted_vs_measured": 1.3554001997431875,
       "profile_used": "onchip",
       "sw_epoch_ops": {},
-      "weights_bytes": 1203237
+      "weights_bytes": 1203445
      },
      "model_id": "handpose_estimation_mediapipe",
      "signature": "",
-     "ts": "2026-08-15T12:12:46Z",
+     "stage_ts": {
+      "board": "2026-08-15T14:22:02Z",
+      "generate": "2026-08-15T14:17:07Z"
+     },
+     "ts": "2026-08-15T14:22:02Z",
      "variant_id": "onchip/int8/in-f32/npu",
      "verdict": "MEASURED"
     }
@@ -352,12 +702,18 @@
     "graph_id": "human-segmentation-pphumanseg-2023mar",
     "is_infra_last": false,
     "metrics": {
-     "activations_bytes": 2080768,
+     "activations_bytes": 2205184,
+     "canary_drift": null,
+     "canary_ms": 0.105,
+     "canary_reference_ms": 0.105,
+     "determinism_gate": "insufficient",
+     "determinism_reason": "1 of 3 required load(s) produced a measurement",
      "ec_blobs": 0,
      "epochs_hw": 76,
-     "epochs_nox": 3,
+     "epochs_nox": 2,
      "epochs_sw": 15,
      "epochs_total": 96,
+     "invokes_per_load": 10,
      "io_bytes": 0,
      "ladder": [
       {
@@ -369,21 +725,31 @@
        "profile": "extflash"
       }
      ],
-     "latency_ms": 55.011,
-     "latency_ms_median": 55.011,
+     "latency_ms_cv": null,
+     "latency_ms_median": 56.136,
+     "latency_ms_per_load": [
+      56.136
+     ],
+     "latency_ms_within_load_cv": 0.0016745047741199943,
+     "loads_attempted": 3,
+     "loads_ok": 1,
+     "loads_required": 3,
      "macc_total": 581570784,
-     "ontarget_cos": 0.999999,
+     "ontarget_cos": 0.999881,
+     "ontarget_input_source": "calibration-corpus",
+     "param_buffers": 382,
+     "param_bytes": 1551871,
      "pool_placement": "weights-in-flash",
      "pools": {
       "cpuRAM2": 1048576,
-      "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2408448,
+      "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2422272,
       "npuRAM3": 294912,
-      "npuRAM4": 294912,
-      "npuRAM5": 442368,
+      "npuRAM4": 405504,
+      "npuRAM5": 456192,
       "octoFlash": 1553905
      },
-     "predicted_ms": 16.629174,
-     "predicted_vs_measured": 3.3081017734254274,
+     "predicted_ms": 17.177526,
+     "predicted_vs_measured": 3.2679909784447423,
      "profile_used": "extflash",
      "sw_epoch_ops": {
       "Resize": 14,
@@ -393,12 +759,16 @@
     },
     "model_id": "human_segmentation_pphumanseg",
     "signature": "",
-    "ts": "2026-08-15T12:14:39Z",
+    "stage_ts": {
+     "board": "2026-08-15T14:33:18Z",
+     "generate": "2026-08-15T14:30:15Z"
+    },
+    "ts": "2026-08-15T14:33:18Z",
     "variant_id": "extflash/int8/in-f32/npu",
     "verdict": "MEASURED"
    },
    "graph_id": "human-segmentation-pphumanseg-2023mar",
-   "infra_events": 0,
+   "infra_events": 1,
    "model_id": "human_segmentation_pphumanseg",
    "variants": {
     "": {
@@ -411,17 +781,25 @@
       "applied": [],
       "audit_failures": [],
       "bytes": 6163938,
-      "calibration_provider": "synthetic",
-      "calibration_samples": 0,
-      "calibration_synthetic": true,
+      "calibration_preprocessor": "",
+      "calibration_provider": "image_folder",
+      "calibration_samples": 128,
+      "calibration_source": "~/datasets/tiny-imagenet-200/valid",
+      "calibration_synthetic": false,
       "changed": 0,
       "dynamic_conditional": 0,
       "errors": 0,
+      "fidelity_real_inputs": true,
+      "fidelity_samples": 8,
       "folded_constants": [],
       "hf_revision": "main",
-      "int8_cos": 0.9999969191253766,
-      "int8_mae": 0.0024348999505182777,
-      "int8_max_abs": 0.02559009939432144,
+      "int8_cos": 0.9999082725767798,
+      "int8_mae": 0.004139770517432096,
+      "int8_max_abs": 0.13147330284118652,
+      "int8_peak_activation_fused": 4490856,
+      "int8_placement": "activations-in-psram",
+      "int8_quantised_weight_bytes": 1547453,
+      "int8_unresolved_tensors": 0,
       "io_bytes": 737280,
       "ir_version": 8,
       "is_quantised": false,
@@ -475,7 +853,16 @@
      },
      "model_id": "human_segmentation_pphumanseg",
      "signature": "",
-     "ts": "2026-08-15T12:12:50Z",
+     "stage_ts": {
+      "budget": "2026-08-15T11:48:29Z",
+      "fetch": "2026-08-15T11:48:29Z",
+      "lint": "2026-08-15T11:48:29Z",
+      "patch": "2026-08-15T11:48:29Z",
+      "probe": "2026-08-15T11:48:29Z",
+      "quantize": "2026-08-15T14:29:52Z",
+      "shape": "2026-08-15T11:48:29Z"
+     },
+     "ts": "2026-08-15T14:29:52Z",
      "variant_id": "",
      "verdict": "QUANTIZES"
     },
@@ -486,12 +873,18 @@
      "graph_id": "human-segmentation-pphumanseg-2023mar",
      "is_infra_last": false,
      "metrics": {
-      "activations_bytes": 2080768,
+      "activations_bytes": 2205184,
+      "canary_drift": null,
+      "canary_ms": 0.105,
+      "canary_reference_ms": 0.105,
+      "determinism_gate": "insufficient",
+      "determinism_reason": "1 of 3 required load(s) produced a measurement",
       "ec_blobs": 0,
       "epochs_hw": 76,
-      "epochs_nox": 3,
+      "epochs_nox": 2,
       "epochs_sw": 15,
       "epochs_total": 96,
+      "invokes_per_load": 10,
       "io_bytes": 0,
       "ladder": [
        {
@@ -503,21 +896,31 @@
         "profile": "extflash"
        }
       ],
-      "latency_ms": 55.011,
-      "latency_ms_median": 55.011,
+      "latency_ms_cv": null,
+      "latency_ms_median": 56.136,
+      "latency_ms_per_load": [
+       56.136
+      ],
+      "latency_ms_within_load_cv": 0.0016745047741199943,
+      "loads_attempted": 3,
+      "loads_ok": 1,
+      "loads_required": 3,
       "macc_total": 581570784,
-      "ontarget_cos": 0.999999,
+      "ontarget_cos": 0.999881,
+      "ontarget_input_source": "calibration-corpus",
+      "param_buffers": 382,
+      "param_bytes": 1551871,
       "pool_placement": "weights-in-flash",
       "pools": {
        "cpuRAM2": 1048576,
-       "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2408448,
+       "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2422272,
        "npuRAM3": 294912,
-       "npuRAM4": 294912,
-       "npuRAM5": 442368,
+       "npuRAM4": 405504,
+       "npuRAM5": 456192,
        "octoFlash": 1553905
       },
-      "predicted_ms": 16.629174,
-      "predicted_vs_measured": 3.3081017734254274,
+      "predicted_ms": 17.177526,
+      "predicted_vs_measured": 3.2679909784447423,
       "profile_used": "extflash",
       "sw_epoch_ops": {
        "Resize": 14,
@@ -527,7 +930,11 @@
      },
      "model_id": "human_segmentation_pphumanseg",
      "signature": "",
-     "ts": "2026-08-15T12:14:39Z",
+     "stage_ts": {
+      "board": "2026-08-15T14:33:18Z",
+      "generate": "2026-08-15T14:30:15Z"
+     },
+     "ts": "2026-08-15T14:33:18Z",
      "variant_id": "extflash/int8/in-f32/npu",
      "verdict": "MEASURED"
     }
@@ -543,11 +950,17 @@
     "is_infra_last": false,
     "metrics": {
      "activations_bytes": 14112,
+     "canary_drift": null,
+     "canary_ms": null,
+     "canary_reference_ms": null,
+     "determinism_gate": "trusted",
+     "determinism_reason": "3 loads x 10 invokes, across-load CV 0.55%",
      "ec_blobs": 0,
      "epochs_hw": 8,
      "epochs_nox": 2,
      "epochs_sw": 0,
      "epochs_total": 10,
+     "invokes_per_load": 10,
      "io_bytes": 0,
      "ladder": [
       {
@@ -555,10 +968,21 @@
        "profile": "onchip"
       }
      ],
-     "latency_ms": 0.106,
-     "latency_ms_median": 0.106,
+     "latency_ms_cv": 0.00551608537442318,
+     "latency_ms_median": 0.105,
+     "latency_ms_per_load": [
+      0.105,
+      0.104,
+      0.105
+     ],
+     "latency_ms_within_load_cv": 0.03821733821733822,
+     "loads_attempted": 3,
+     "loads_ok": 3,
+     "loads_required": 3,
      "macc_total": 796885,
-     "ontarget_cos": 0.999978,
+     "ontarget_cos": 0.999974,
+     "param_buffers": 10,
+     "param_bytes": 6100,
      "pool_placement": "all-on-chip",
      "pools": {
       "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 1972225,
@@ -566,19 +990,23 @@
       "npuRAM5": 6145
      },
      "predicted_ms": 0.020246,
-     "predicted_vs_measured": 5.2356020942408374,
+     "predicted_vs_measured": 5.18620962165366,
      "profile_used": "onchip",
      "sw_epoch_ops": {},
      "weights_bytes": 6145
     },
     "model_id": "inference-engine-mnist-12",
     "signature": "",
-    "ts": "2026-08-15T12:05:47Z",
+    "stage_ts": {
+     "board": "2026-08-15T13:10:03Z",
+     "generate": "2026-08-15T13:55:21Z"
+    },
+    "ts": "2026-08-15T13:55:21Z",
     "variant_id": "onchip/int8/in-f32/npu",
     "verdict": "MEASURED"
    },
    "graph_id": "mnist-12",
-   "infra_events": 0,
+   "infra_events": 1,
    "model_id": "inference-engine-mnist-12",
    "variants": {
     "": {
@@ -593,17 +1021,25 @@
       ],
       "audit_failures": [],
       "bytes": 26143,
+      "calibration_preprocessor": "",
       "calibration_provider": "synthetic",
-      "calibration_samples": 0,
+      "calibration_samples": 128,
+      "calibration_source": "",
       "calibration_synthetic": true,
       "changed": 0,
       "dynamic_conditional": 0,
       "errors": 0,
+      "fidelity_real_inputs": false,
+      "fidelity_samples": 8,
       "folded_constants": [],
       "hf_revision": "main",
-      "int8_cos": 0.9993662765313862,
-      "int8_mae": 0.07974832076579333,
-      "int8_max_abs": 0.26686060428619385,
+      "int8_cos": 0.9991497060314224,
+      "int8_mae": 0.09708165051415563,
+      "int8_max_abs": 0.37572498619556427,
+      "int8_peak_activation_fused": 37224,
+      "int8_placement": "all-on-chip",
+      "int8_quantised_weight_bytes": 6103,
+      "int8_unresolved_tensors": 0,
       "io_bytes": 3176,
       "ir_version": 7,
       "is_quantised": false,
@@ -648,7 +1084,16 @@
      },
      "model_id": "inference-engine-mnist-12",
      "signature": "",
-     "ts": "2026-08-15T12:05:34Z",
+     "stage_ts": {
+      "budget": "2026-08-15T11:48:29Z",
+      "fetch": "2026-08-15T11:48:29Z",
+      "lint": "2026-08-15T11:48:29Z",
+      "patch": "2026-08-15T11:48:29Z",
+      "probe": "2026-08-15T11:48:29Z",
+      "quantize": "2026-08-15T13:55:18Z",
+      "shape": "2026-08-15T11:48:29Z"
+     },
+     "ts": "2026-08-15T13:55:18Z",
      "variant_id": "",
      "verdict": "QUANTIZES"
     },
@@ -660,11 +1105,17 @@
      "is_infra_last": false,
      "metrics": {
       "activations_bytes": 14112,
+      "canary_drift": null,
+      "canary_ms": null,
+      "canary_reference_ms": null,
+      "determinism_gate": "trusted",
+      "determinism_reason": "3 loads x 10 invokes, across-load CV 0.55%",
       "ec_blobs": 0,
       "epochs_hw": 8,
       "epochs_nox": 2,
       "epochs_sw": 0,
       "epochs_total": 10,
+      "invokes_per_load": 10,
       "io_bytes": 0,
       "ladder": [
        {
@@ -672,10 +1123,21 @@
         "profile": "onchip"
        }
       ],
-      "latency_ms": 0.106,
-      "latency_ms_median": 0.106,
+      "latency_ms_cv": 0.00551608537442318,
+      "latency_ms_median": 0.105,
+      "latency_ms_per_load": [
+       0.105,
+       0.104,
+       0.105
+      ],
+      "latency_ms_within_load_cv": 0.03821733821733822,
+      "loads_attempted": 3,
+      "loads_ok": 3,
+      "loads_required": 3,
       "macc_total": 796885,
-      "ontarget_cos": 0.999978,
+      "ontarget_cos": 0.999974,
+      "param_buffers": 10,
+      "param_bytes": 6100,
       "pool_placement": "all-on-chip",
       "pools": {
        "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 1972225,
@@ -683,14 +1145,18 @@
        "npuRAM5": 6145
       },
       "predicted_ms": 0.020246,
-      "predicted_vs_measured": 5.2356020942408374,
+      "predicted_vs_measured": 5.18620962165366,
       "profile_used": "onchip",
       "sw_epoch_ops": {},
       "weights_bytes": 6145
      },
      "model_id": "inference-engine-mnist-12",
      "signature": "",
-     "ts": "2026-08-15T12:05:47Z",
+     "stage_ts": {
+      "board": "2026-08-15T13:10:03Z",
+      "generate": "2026-08-15T13:55:21Z"
+     },
+     "ts": "2026-08-15T13:55:21Z",
      "variant_id": "onchip/int8/in-f32/npu",
      "verdict": "MEASURED"
     }
@@ -706,11 +1172,17 @@
     "is_infra_last": false,
     "metrics": {
      "activations_bytes": 2107392,
+     "canary_drift": 0.009615384615384581,
+     "canary_ms": 0.105,
+     "canary_reference_ms": 0.104,
+     "determinism_gate": "trusted",
+     "determinism_reason": "3 loads x 10 invokes, across-load CV 0.00%",
      "ec_blobs": 0,
-     "epochs_hw": 54,
+     "epochs_hw": 55,
      "epochs_nox": 2,
      "epochs_sw": 0,
-     "epochs_total": 56,
+     "epochs_total": 57,
+     "invokes_per_load": 10,
      "io_bytes": 0,
      "ladder": [
       {
@@ -722,10 +1194,22 @@
        "profile": "extflash"
       }
      ],
-     "latency_ms": 22.056,
-     "latency_ms_median": 22.056,
+     "latency_ms_cv": 2.6115780699782792e-05,
+     "latency_ms_median": 22.107,
+     "latency_ms_per_load": [
+      22.108,
+      22.107,
+      22.107
+     ],
+     "latency_ms_within_load_cv": 0.00021109111499411766,
+     "loads_attempted": 3,
+     "loads_ok": 3,
+     "loads_required": 3,
      "macc_total": 356062521,
-     "ontarget_cos": 0.998691,
+     "ontarget_cos": 0.994855,
+     "ontarget_input_source": "calibration-corpus",
+     "param_buffers": 195,
+     "param_bytes": 3946447,
      "pool_placement": "weights-in-flash",
      "pools": {
       "cpuRAM2": 1048576,
@@ -733,22 +1217,26 @@
       "npuRAM3": 155648,
       "npuRAM4": 451584,
       "npuRAM5": 451584,
-      "octoFlash": 3946529
+      "octoFlash": 3947041
      },
-     "predicted_ms": 31.146776000000003,
-     "predicted_vs_measured": 0.7081310759097507,
+     "predicted_ms": 31.209496,
+     "predicted_vs_measured": 0.7083421020320225,
      "profile_used": "extflash",
      "sw_epoch_ops": {},
-     "weights_bytes": 3946529
+     "weights_bytes": 3947041
     },
     "model_id": "mobilenet_v2_1.0_224",
     "signature": "",
-    "ts": "2026-08-15T12:26:25Z",
+    "stage_ts": {
+     "board": "2026-08-15T14:29:24Z",
+     "generate": "2026-08-15T14:22:26Z"
+    },
+    "ts": "2026-08-15T14:29:24Z",
     "variant_id": "extflash/int8/in-f32/npu",
     "verdict": "MEASURED"
    },
    "graph_id": "model",
-   "infra_events": 1,
+   "infra_events": 2,
    "model_id": "mobilenet_v2_1.0_224",
    "variants": {
     "": {
@@ -763,17 +1251,25 @@
       ],
       "audit_failures": [],
       "bytes": 14002696,
-      "calibration_provider": "synthetic",
-      "calibration_samples": 0,
-      "calibration_synthetic": true,
+      "calibration_preprocessor": "",
+      "calibration_provider": "image_folder",
+      "calibration_samples": 128,
+      "calibration_source": "~/datasets/tiny-imagenet-200/valid",
+      "calibration_synthetic": false,
       "changed": 102,
       "dynamic_conditional": 0,
       "errors": 0,
+      "fidelity_real_inputs": true,
+      "fidelity_samples": 8,
       "folded_constants": [],
       "hf_revision": "main",
-      "int8_cos": 0.9927736880675998,
-      "int8_mae": 0.15696620556561242,
-      "int8_max_abs": 0.9461192488670349,
+      "int8_cos": 0.970174736477699,
+      "int8_mae": 0.298776583535807,
+      "int8_max_abs": 2.321626842021942,
+      "int8_peak_activation_fused": 9560484,
+      "int8_placement": "activations-in-psram",
+      "int8_quantised_weight_bytes": 3561391,
+      "int8_unresolved_tensors": 0,
       "io_bytes": 606116,
       "ir_version": 9,
       "is_quantised": false,
@@ -825,7 +1321,16 @@
      },
      "model_id": "mobilenet_v2_1.0_224",
      "signature": "",
-     "ts": "2026-08-15T12:23:21Z",
+     "stage_ts": {
+      "budget": "2026-08-15T11:48:30Z",
+      "fetch": "2026-08-15T11:48:30Z",
+      "lint": "2026-08-15T11:48:30Z",
+      "patch": "2026-08-15T11:48:30Z",
+      "probe": "2026-08-15T11:48:30Z",
+      "quantize": "2026-08-15T14:22:06Z",
+      "shape": "2026-08-15T11:48:30Z"
+     },
+     "ts": "2026-08-15T14:22:06Z",
      "variant_id": "",
      "verdict": "QUANTIZES"
     },
@@ -837,11 +1342,17 @@
      "is_infra_last": false,
      "metrics": {
       "activations_bytes": 2107392,
+      "canary_drift": 0.009615384615384581,
+      "canary_ms": 0.105,
+      "canary_reference_ms": 0.104,
+      "determinism_gate": "trusted",
+      "determinism_reason": "3 loads x 10 invokes, across-load CV 0.00%",
       "ec_blobs": 0,
-      "epochs_hw": 54,
+      "epochs_hw": 55,
       "epochs_nox": 2,
       "epochs_sw": 0,
-      "epochs_total": 56,
+      "epochs_total": 57,
+      "invokes_per_load": 10,
       "io_bytes": 0,
       "ladder": [
        {
@@ -853,10 +1364,22 @@
         "profile": "extflash"
        }
       ],
-      "latency_ms": 22.056,
-      "latency_ms_median": 22.056,
+      "latency_ms_cv": 2.6115780699782792e-05,
+      "latency_ms_median": 22.107,
+      "latency_ms_per_load": [
+       22.108,
+       22.107,
+       22.107
+      ],
+      "latency_ms_within_load_cv": 0.00021109111499411766,
+      "loads_attempted": 3,
+      "loads_ok": 3,
+      "loads_required": 3,
       "macc_total": 356062521,
-      "ontarget_cos": 0.998691,
+      "ontarget_cos": 0.994855,
+      "ontarget_input_source": "calibration-corpus",
+      "param_buffers": 195,
+      "param_bytes": 3946447,
       "pool_placement": "weights-in-flash",
       "pools": {
        "cpuRAM2": 1048576,
@@ -864,17 +1387,21 @@
        "npuRAM3": 155648,
        "npuRAM4": 451584,
        "npuRAM5": 451584,
-       "octoFlash": 3946529
+       "octoFlash": 3947041
       },
-      "predicted_ms": 31.146776000000003,
-      "predicted_vs_measured": 0.7081310759097507,
+      "predicted_ms": 31.209496,
+      "predicted_vs_measured": 0.7083421020320225,
       "profile_used": "extflash",
       "sw_epoch_ops": {},
-      "weights_bytes": 3946529
+      "weights_bytes": 3947041
      },
      "model_id": "mobilenet_v2_1.0_224",
      "signature": "",
-     "ts": "2026-08-15T12:26:25Z",
+     "stage_ts": {
+      "board": "2026-08-15T14:29:24Z",
+      "generate": "2026-08-15T14:22:26Z"
+     },
+     "ts": "2026-08-15T14:29:24Z",
      "variant_id": "extflash/int8/in-f32/npu",
      "verdict": "MEASURED"
     }
@@ -939,6 +1466,12 @@
     },
     "model_id": "silero-vad",
     "signature": "e23bbb8412c8",
+    "stage_ts": {
+     "fetch": "2026-08-15T11:48:30Z",
+     "patch": "2026-08-15T11:48:30Z",
+     "probe": "2026-08-15T11:48:30Z",
+     "shape": "2026-08-15T11:48:30Z"
+    },
     "ts": "2026-08-15T11:48:30Z",
     "variant_id": "",
     "verdict": "REJECTED"
@@ -1004,16 +1537,447 @@
      },
      "model_id": "silero-vad",
      "signature": "e23bbb8412c8",
+     "stage_ts": {
+      "fetch": "2026-08-15T11:48:30Z",
+      "patch": "2026-08-15T11:48:30Z",
+      "probe": "2026-08-15T11:48:30Z",
+      "shape": "2026-08-15T11:48:30Z"
+     },
      "ts": "2026-08-15T11:48:30Z",
      "variant_id": "",
      "verdict": "REJECTED"
     }
    },
    "verdict": "REJECTED"
+  },
+  {
+   "best": {
+    "blocked_by": "fetch",
+    "deepest_stage": "",
+    "failure_class": "SKIPPED",
+    "graph_id": "decoder-model",
+    "is_infra_last": false,
+    "metrics": {},
+    "model_id": "whisper-tiny-en",
+    "signature": "",
+    "stage_ts": {},
+    "ts": "2026-08-15T12:52:23Z",
+    "variant_id": "",
+    "verdict": "SKIPPED"
+   },
+   "graph_id": "decoder-model",
+   "infra_events": 0,
+   "model_id": "whisper-tiny-en",
+   "variants": {
+    "": {
+     "blocked_by": "fetch",
+     "deepest_stage": "",
+     "failure_class": "SKIPPED",
+     "graph_id": "decoder-model",
+     "is_infra_last": false,
+     "metrics": {},
+     "model_id": "whisper-tiny-en",
+     "signature": "",
+     "stage_ts": {},
+     "ts": "2026-08-15T12:52:23Z",
+     "variant_id": "",
+     "verdict": "SKIPPED"
+    }
+   },
+   "verdict": "SKIPPED"
+  },
+  {
+   "best": {
+    "blocked_by": "fetch",
+    "deepest_stage": "",
+    "failure_class": "SKIPPED",
+    "graph_id": "decoder-model-merged",
+    "is_infra_last": false,
+    "metrics": {},
+    "model_id": "whisper-tiny-en",
+    "signature": "",
+    "stage_ts": {},
+    "ts": "2026-08-15T12:52:23Z",
+    "variant_id": "",
+    "verdict": "SKIPPED"
+   },
+   "graph_id": "decoder-model-merged",
+   "infra_events": 0,
+   "model_id": "whisper-tiny-en",
+   "variants": {
+    "": {
+     "blocked_by": "fetch",
+     "deepest_stage": "",
+     "failure_class": "SKIPPED",
+     "graph_id": "decoder-model-merged",
+     "is_infra_last": false,
+     "metrics": {},
+     "model_id": "whisper-tiny-en",
+     "signature": "",
+     "stage_ts": {},
+     "ts": "2026-08-15T12:52:23Z",
+     "variant_id": "",
+     "verdict": "SKIPPED"
+    }
+   },
+   "verdict": "SKIPPED"
+  },
+  {
+   "best": {
+    "blocked_by": "fetch",
+    "deepest_stage": "",
+    "failure_class": "SKIPPED",
+    "graph_id": "decoder-with-past-model",
+    "is_infra_last": false,
+    "metrics": {},
+    "model_id": "whisper-tiny-en",
+    "signature": "",
+    "stage_ts": {},
+    "ts": "2026-08-15T12:52:23Z",
+    "variant_id": "",
+    "verdict": "SKIPPED"
+   },
+   "graph_id": "decoder-with-past-model",
+   "infra_events": 0,
+   "model_id": "whisper-tiny-en",
+   "variants": {
+    "": {
+     "blocked_by": "fetch",
+     "deepest_stage": "",
+     "failure_class": "SKIPPED",
+     "graph_id": "decoder-with-past-model",
+     "is_infra_last": false,
+     "metrics": {},
+     "model_id": "whisper-tiny-en",
+     "signature": "",
+     "stage_ts": {},
+     "ts": "2026-08-15T12:52:23Z",
+     "variant_id": "",
+     "verdict": "SKIPPED"
+    }
+   },
+   "verdict": "SKIPPED"
+  },
+  {
+   "best": {
+    "blocked_by": "",
+    "deepest_stage": "board",
+    "failure_class": "",
+    "graph_id": "encoder-model",
+    "is_infra_last": false,
+    "metrics": {
+     "activations_bytes": 16778704,
+     "canary_drift": null,
+     "canary_ms": 0.105,
+     "canary_reference_ms": 0.105,
+     "determinism_gate": "trusted",
+     "determinism_reason": "3 loads x 10 invokes, across-load CV 0.05%",
+     "ec_blobs": 0,
+     "epochs_hw": 130,
+     "epochs_nox": 61,
+     "epochs_sw": 184,
+     "epochs_total": 391,
+     "invokes_per_load": 10,
+     "io_bytes": 0,
+     "ladder": [
+      {
+       "ok": false,
+       "profile": "onchip"
+      },
+      {
+       "ok": false,
+       "profile": "extflash"
+      },
+      {
+       "ok": true,
+       "profile": "extram"
+      }
+     ],
+     "latency_ms_cv": 0.000539904751826238,
+     "latency_ms_median": 10935.052,
+     "latency_ms_per_load": [
+      10935.052,
+      10925.642,
+      10936.52
+     ],
+     "latency_ms_within_load_cv": 0.0009167386968611432,
+     "loads_attempted": 3,
+     "loads_ok": 3,
+     "loads_required": 3,
+     "macc_total": 2122951144,
+     "ontarget_cos": 1.0,
+     "ontarget_input_source": "calibration-corpus",
+     "param_buffers": 751,
+     "param_bytes": 7918810,
+     "pool_placement": "activations-in-psram",
+     "pools": {
+      "cpuRAM2": 1011456,
+      "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2867200,
+      "hyperRAM": 13972432,
+      "npuRAM3": 442368,
+      "npuRAM4": 456560,
+      "npuRAM5": 453520,
+      "npuRAM6": 442368
+     },
+     "predicted_ms": 111.35417699999999,
+     "predicted_vs_measured": 98.20064495649768,
+     "profile_used": "extram",
+     "sw_epoch_ops": {
+      "Conv": 72,
+      "DequantizeLinear": 27,
+      "Div": 9,
+      "GlobalAveragePool": 18,
+      "Pow": 9,
+      "QuantizeLinear": 27,
+      "Softmax": 4,
+      "Sqrt": 9,
+      "Sub": 9
+     },
+     "weights_bytes": 13972432
+    },
+    "model_id": "whisper-tiny-en",
+    "signature": "",
+    "stage_ts": {
+     "board": "2026-08-15T15:23:28Z",
+     "generate": "2026-08-15T15:04:36Z"
+    },
+    "ts": "2026-08-15T15:23:28Z",
+    "variant_id": "extram/int8/in-f32/npu",
+    "verdict": "MEASURED"
+   },
+   "graph_id": "encoder-model",
+   "infra_events": 2,
+   "model_id": "whisper-tiny-en",
+   "variants": {
+    "": {
+     "blocked_by": "",
+     "deepest_stage": "quantize",
+     "failure_class": "",
+     "graph_id": "encoder-model",
+     "is_infra_last": false,
+     "metrics": {
+      "applied": [
+       "slice_positional_embedding"
+      ],
+      "audit_failures": [],
+      "bytes": 32904992,
+      "calibration_preprocessor": "log_mel_whisper",
+      "calibration_provider": "audio_folder",
+      "calibration_samples": 128,
+      "calibration_source": "~/datasets/voicebank-demand-16k/clean",
+      "calibration_synthetic": false,
+      "changed": 4,
+      "dynamic_conditional": 8,
+      "errors": 0,
+      "fidelity_real_inputs": true,
+      "fidelity_samples": 8,
+      "folded_constants": [],
+      "hf_revision": "main",
+      "int8_cos": 0.8294957894181847,
+      "int8_mae": 0.5699534427380092,
+      "int8_max_abs": 14.499237537384033,
+      "int8_peak_activation_fused": 9466018,
+      "int8_placement": "activations-in-psram",
+      "int8_quantised_weight_bytes": 7745485,
+      "int8_unresolved_tensors": 0,
+      "io_bytes": 544000,
+      "ir_version": 7,
+      "is_quantised": false,
+      "macs": 2118144000,
+      "max_rank": 3,
+      "max_tensor_dim": 1536,
+      "nodes": 495,
+      "ops_frontend_only": 0,
+      "ops_npu": 304,
+      "ops_sw": 27,
+      "ops_sw_unlocked": 23,
+      "ops_unsupported": 0,
+      "opset": 14,
+      "parity_unverified": [
+       "slice_positional_embedding"
+      ],
+      "peak_activation_fused": 4992004,
+      "peak_activation_raw": 4992004,
+      "per_channel": true,
+      "pinned": {
+       "batch_size": 1,
+       "encoder_sequence_length": 500,
+       "feature_size": 80
+      },
+      "placement": "activations-in-psram",
+      "pre_patch_violations": [
+       {
+        "message": "opset 14 is above the 13 both prior projects pinned to",
+        "rule": "opset",
+        "severity": "warn"
+       },
+       {
+        "message": "35 node instances land on the Cortex-M55",
+        "rule": "sw_budget",
+        "severity": "warn"
+       },
+       {
+        "message": "8 of 34 MatMul/Gemm/Conv have a non-constant second operand: {'MatMul': 8}",
+        "rule": "dynamic_matmul",
+        "severity": "warn"
+       }
+      ],
+      "quant_notes": [],
+      "quantised_weight_bytes": 30913536,
+      "quantize_ops": 219,
+      "rejected": [],
+      "requested": [
+       "slice_positional_embedding"
+      ],
+      "resolution": {},
+      "subgraph_nodes": 0,
+      "suggested_patches": [],
+      "unresolved_tensors": 0,
+      "upgraded_opset_from": null,
+      "violations": [
+       {
+        "message": "opset 14 is above the 13 both prior projects pinned to",
+        "rule": "opset",
+        "severity": "warn"
+       },
+       {
+        "message": "35 node instances land on the Cortex-M55",
+        "rule": "sw_budget",
+        "severity": "warn"
+       },
+       {
+        "message": "8 of 34 MatMul/Gemm/Conv have a non-constant second operand: {'MatMul': 8}",
+        "rule": "dynamic_matmul",
+        "severity": "warn"
+       }
+      ],
+      "warnings": 3,
+      "weight_bytes": 30913536,
+      "weight_bytes_fp32": 30913536,
+      "weight_bytes_int8": 7810817,
+      "weight_bytes_raw": 32833536,
+      "weight_compression": 3.957785209921062
+     },
+     "model_id": "whisper-tiny-en",
+     "signature": "",
+     "stage_ts": {
+      "budget": "2026-08-15T12:52:23Z",
+      "fetch": "2026-08-15T12:52:23Z",
+      "lint": "2026-08-15T12:52:23Z",
+      "patch": "2026-08-15T12:52:23Z",
+      "probe": "2026-08-15T12:52:23Z",
+      "quantize": "2026-08-15T15:03:37Z",
+      "shape": "2026-08-15T12:52:23Z"
+     },
+     "ts": "2026-08-15T15:03:37Z",
+     "variant_id": "",
+     "verdict": "QUANTIZES"
+    },
+    "extram/int8/in-f32/npu": {
+     "blocked_by": "",
+     "deepest_stage": "board",
+     "failure_class": "",
+     "graph_id": "encoder-model",
+     "is_infra_last": false,
+     "metrics": {
+      "activations_bytes": 16778704,
+      "canary_drift": null,
+      "canary_ms": 0.105,
+      "canary_reference_ms": 0.105,
+      "determinism_gate": "trusted",
+      "determinism_reason": "3 loads x 10 invokes, across-load CV 0.05%",
+      "ec_blobs": 0,
+      "epochs_hw": 130,
+      "epochs_nox": 61,
+      "epochs_sw": 184,
+      "epochs_total": 391,
+      "invokes_per_load": 10,
+      "io_bytes": 0,
+      "ladder": [
+       {
+        "ok": false,
+        "profile": "onchip"
+       },
+       {
+        "ok": false,
+        "profile": "extflash"
+       },
+       {
+        "ok": true,
+        "profile": "extram"
+       }
+      ],
+      "latency_ms_cv": 0.000539904751826238,
+      "latency_ms_median": 10935.052,
+      "latency_ms_per_load": [
+       10935.052,
+       10925.642,
+       10936.52
+      ],
+      "latency_ms_within_load_cv": 0.0009167386968611432,
+      "loads_attempted": 3,
+      "loads_ok": 3,
+      "loads_required": 3,
+      "macc_total": 2122951144,
+      "ontarget_cos": 1.0,
+      "ontarget_input_source": "calibration-corpus",
+      "param_buffers": 751,
+      "param_bytes": 7918810,
+      "pool_placement": "activations-in-psram",
+      "pools": {
+       "cpuRAM2": 1011456,
+       "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 2867200,
+       "hyperRAM": 13972432,
+       "npuRAM3": 442368,
+       "npuRAM4": 456560,
+       "npuRAM5": 453520,
+       "npuRAM6": 442368
+      },
+      "predicted_ms": 111.35417699999999,
+      "predicted_vs_measured": 98.20064495649768,
+      "profile_used": "extram",
+      "sw_epoch_ops": {
+       "Conv": 72,
+       "DequantizeLinear": 27,
+       "Div": 9,
+       "GlobalAveragePool": 18,
+       "Pow": 9,
+       "QuantizeLinear": 27,
+       "Softmax": 4,
+       "Sqrt": 9,
+       "Sub": 9
+      },
+      "weights_bytes": 13972432
+     },
+     "model_id": "whisper-tiny-en",
+     "signature": "",
+     "stage_ts": {
+      "board": "2026-08-15T15:23:28Z",
+      "generate": "2026-08-15T15:04:36Z"
+     },
+     "ts": "2026-08-15T15:23:28Z",
+     "variant_id": "extram/int8/in-f32/npu",
+     "verdict": "MEASURED"
+    }
+   },
+   "verdict": "MEASURED"
   }
  ],
- "infra_events": 1,
+ "infra_events": 7,
  "signatures": {
+  "6341ebf36f69": {
+   "count": 1,
+   "example_error": "quantize_static failed: InvalidArgument: [ONNXRuntimeError] : 2 : INVALID_ARGUMENT : Non-zero status code returned while running If node. Name:'If_0' Status Message: Non-zero status code returned while running Pad node. Name:'If_0_else_branch__Inline_0__/stft/padding/Pad' Status Message: Pad reflect requires axis length >= 2 after slicing. Input shape:{1,1}",
+   "failure_class": "QUANT_FAILED",
+   "known_issue": "",
+   "models": [
+    "silero-vad"
+   ],
+   "signature": "6341ebf36f69",
+   "stages": [
+    "quantize"
+   ]
+  },
   "e23bbb8412c8": {
    "count": 1,
    "example_error": "[control_flow] control flow at the top level: {'If': 1} hiding 156 nodes in subgraphs; [anonymous_dims] dynamic axes with no name: ['input[0]', 'input[1]', 'state[1]']",
@@ -1028,5 +1992,5 @@
    ]
   }
  },
- "total_events": 53
+ "total_events": 147
 }

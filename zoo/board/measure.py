@@ -51,10 +51,24 @@ class ValidateResult:
     duration_s: float = 0.0
     error: str = ""
     raw: str = ""
+    #: Dispersion across the invokes of this one load, straight out of
+    #: `validate`'s own summary line. Free evidence: it costs nothing beyond
+    #: asking for more samples, and it separates a noisy model from a noisy
+    #: bench before any repeat load is attempted.
+    latency_min_ms: float | None = None
+    latency_max_ms: float | None = None
+    latency_std_ms: float | None = None
+    samples: int = 0
     extra: dict[str, Any] = field(default_factory=dict)
 
     def metrics(self) -> dict[str, Any]:
-        out = {"latency_ms": self.latency_ms, "ontarget_cos": self.cosine}
+        out = {
+            "latency_ms": self.latency_ms,
+            "ontarget_cos": self.cosine,
+            "latency_min_ms": self.latency_min_ms,
+            "latency_max_ms": self.latency_max_ms,
+            "latency_std_ms": self.latency_std_ms,
+        }
         out.update(self.extra)
         return {k: v for k, v in out.items() if v is not None}
 
@@ -108,11 +122,20 @@ def load_network(
     return last
 
 
-#: `validate` prints e.g. "duration     : 2.791 ms by sample" and a per-output
-#: cosine line. Both spellings have moved between core releases, so match
-#: loosely and record the raw text either way.
+#: `validate` prints e.g.
+#:
+#:     duration    : 0.106 ms by sample (0.103/0.115/0.005)
+#:     nb sample(s): 4
+#:
+#: — mean, then (min/max/std) across the samples of that run. Both spellings of
+#: the duration line have moved between core releases, so match loosely and
+#: record the raw text either way.
 _MS = re.compile(r"duration[^\n:]*:\s*([0-9.]+)\s*ms", re.I)
 _MS_ALT = re.compile(r"([0-9.]+)\s*ms\s+by\s+sample", re.I)
+_SPREAD = re.compile(
+    r"([0-9.]+)\s*ms\s+by\s+sample\s*\(\s*([0-9.]+)\s*/\s*([0-9.]+)\s*/\s*([0-9.]+)\s*\)", re.I
+)
+_SAMPLES = re.compile(r"nb\s+sample\(s\)[^\n:]*:\s*(\d+)", re.I)
 _COS = re.compile(r"cos(?:ine)?[^\n=:]*[=:]\s*([0-9.]+)", re.I)
 
 
@@ -125,8 +148,21 @@ def validate(
     fix_shapes: str | None = None,
     batches: int = 4,
     timeout_s: float = 900.0,
+    val_input: list[Path] | None = None,
 ) -> ValidateResult:
-    """Run the on-target validation: latency, and accuracy against the host."""
+    """Run the on-target validation: latency, and accuracy against the host.
+
+    `val_input` supplies the data to validate *with*. Left unset, `validate`
+    generates uniform random values in **[0, 1]** — its documented default —
+    and the resulting cosine says how closely the device and the host agree on
+    noise in that range. For a model whose inputs are 0-255 pixels that is not
+    a small distortion: the entire input lands inside the first quantisation
+    step of a scale calibrated for 255x more range, and the cosine collapses
+    for a reason that has nothing to do with the deployment.
+
+    So the accuracy column means something different depending on this
+    argument, and which one was used is recorded on the event.
+    """
     prof = profiles.get(profile, tc.core_tag)
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -144,6 +180,8 @@ def validate(
     ]
     if fix_shapes:
         argv += ["--fix-parametric-shapes", fix_shapes]
+    if val_input:
+        argv += ["-vi", *[str(p.resolve()) for p in val_input]]
 
     result = run(argv, cwd=out_dir, timeout_s=timeout_s, log_dir=out_dir, log_name="validate")
     text = result.combined
@@ -155,6 +193,13 @@ def validate(
             latency = float(match.group(1))
             break
 
+    lo = hi = std = None
+    spread = _SPREAD.search(text)
+    if spread:
+        latency = float(spread.group(1))
+        lo, hi, std = (float(spread.group(i)) for i in (2, 3, 4))
+
+    samples = _SAMPLES.search(text)
     cosines = [float(m) for m in _COS.findall(text)]
     cosine = min(cosines) if cosines else None
 
@@ -165,4 +210,8 @@ def validate(
         duration_s=result.duration_s,
         error="" if result.ok else text[-3000:],
         raw=text[-6000:],
+        latency_min_ms=lo,
+        latency_max_ms=hi,
+        latency_std_ms=std,
+        samples=int(samples.group(1)) if samples else 0,
     )

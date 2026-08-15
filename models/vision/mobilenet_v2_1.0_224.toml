@@ -27,7 +27,7 @@ realtime_ms = 0.0   # TODO: wall-clock covered by one invocation (for RTF)
   role  = "feature"
   shape = ["batch_size", 3, 224, 224]
   dtype = "float32"
-  calib = "TODO"   # calibration provider key
+  calib = "image_folder"
 
   [[graph.output]]
   name = "logits"
@@ -40,6 +40,14 @@ backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
 policy          = "first_success"
 
 [calibration]
-provider = "synthetic"   # TODO: a real provider is required for tier 2
+# From the repo's own preprocessor_config.json: rescale_factor 1/255, then
+# image_mean 0.5 / image_std 0.5 — the TensorFlow-style [-1, 1] convention,
+# not ImageNet mean/std.
+provider = "image_folder"
+dataset  = "~/datasets/tiny-imagenet-200/valid"
 n        = 128
 seed     = 0
+
+  [calibration.options]
+  mean = 0.5
+  std  = 0.5
