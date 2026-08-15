@@ -1,0 +1,45 @@
+# Machine-local tool paths. Copy config/toolchain.example.toml and edit.
+config/toolchain.toml
+
+# Generated profile materialisation (absolute paths, machine-specific).
+runs/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# ST Edge AI CWD pollution. The wrappers pass explicit -o/--workspace, but
+# stedgeai still drops these if invoked by hand.
+st_ai_output/
+st_ai_ws/
+
+# Model artifacts are NEVER committed. The reference repos on this machine
+# hold 13 GB and 900 MB respectively, mostly from exactly this. Only the
+# distilled JSON/text under results/artifacts/ goes into git.
+*.onnx
+*.onnx_data
+*.tflite
+*.raw
+*.bin
+*.hex
+*.elf
+*.pt
+*.pth
+*.safetensors
+
+# Generated network code from stedgeai.
+network.c
+network.h
+stai_network.c
+stai_network.h
+network_ecblobs.h
+network_c_info.json
+
+# ...but test fixtures are the whole point of having a parser. Golden files
+# (a real network_c_info.json, minimal failing ONNX graphs) must be committed.
+!tests/fixtures/**
+

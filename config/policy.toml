@@ -1,0 +1,93 @@
+# Every threshold the funnel applies lives here, so a verdict can always be
+# traced to a number someone chose on purpose. Changing a value here changes
+# verdicts; the file's git sha is part of every cache key.
+
+[lint]
+# ST Edge AI Core caps opset at 20, but 13 is what the front end is happiest
+# with and what both prior projects pinned their device artifacts to. The
+# dynamo exporter cannot go below 18, which is why device exports use
+# torch.onnx.export(dynamo=False).
+max_opset = 20
+preferred_opset = 13
+max_ir_version = 8
+
+# The compiler rejects ANY tensor dimension at or above 65536 -- interior
+# tensors included, not just graph I/O. This is why a flat [1, 144160] layout
+# had to become [1, 901, 160] in the dnsmos work.
+max_tensor_dim = 65535
+
+# Rank 5 segfaults the compiler (signo=11), reproducibly.
+max_rank = 4
+
+# Control flow has no mapping at all. `If` is why onnx-community/silero-vad is
+# unusable: its entire network sits inside two If branches.
+forbidden_ops = ["If", "Loop", "Scan", "NonZero"]
+
+# Advisory ceiling on Cortex-M55 software epochs. Not a hard reject -- every
+# real model has some -- but past this the model is epoch-bound by
+# construction and the latency prediction should say so loudly.
+warn_sw_ops = 12
+max_sw_ops = 40
+
+[budget]
+# Usable on-chip pool for the SCREENING harness mpool: cpuRAM2 (1024 KB) plus
+# npuRAM3-6 (4 x 448 KB). The compiler reports the virtual pool at 2,883,576 B.
+onchip_bytes = 2883576
+hyperram_bytes = 33554432      # 32 MB HexaSPI PSRAM
+octoflash_bytes = 117440512    # 112 MB OctoSPI NOR, read-only
+
+# The demo-tier applications reserve memory for themselves, so a model that
+# screens fine can still be too big to promote. Checked at promotion time.
+audio_app_onchip_bytes = 1507328    # 1472 KB: AXISRAM2 + AXISRAM6 only
+vision_app_onchip_bytes = 2883576   # framebuffers live in PSRAM
+
+# Peak activation is the cliff, not the slope. Any external spill costs 5-20x
+# (ST measured: DeepLabv3 320->416 = 5.6x, FastDepth 224->320 = 19.5x), so a
+# model predicted to spill is reported as such rather than quietly accepted.
+activation_warn_frac = 0.85     # of the on-chip pool
+
+[quantize]
+# Confirmed against ST's own quantization.html, not folklore:
+#   - static only; dynamic/weight-only is explicitly unsupported and silently
+#     converted back to float
+#   - QDQ format (QOperator is "not tested")
+#   - signed int8 for BOTH activations and weights; QUInt8 is "not recommended
+#     and not tested" and the NPU rejects it outright
+#   - per-channel symmetric weights
+format = "QDQ"
+activation_type = "QInt8"
+weight_type = "QInt8"
+per_channel = true
+calibrate_method = "MinMax"
+calibration_samples = 128
+calibration_seed = 0
+
+# Host int8-vs-fp32 cosine below this is reported, not hidden. It is NOT a
+# gate: a model that quantises badly is still a valid zoo entry, and the
+# number is the finding.
+fidelity_warn_cos = 0.99
+
+# Silent-quantisation-discard detector. BOOL tensors in the emitted *_Q.json
+# make atonn drop ALL quantisation with no error, yielding a model that
+# compiles, runs, and is secretly float. Compare the compiler's reported
+# weight bytes against the expected int8 size; a large overshoot means it
+# happened.
+quant_discard_ratio = 2.5
+
+[measure]
+# Nothing enters the leaderboard without this much evidence. A full reload per
+# cycle, not just repeated invokes -- the failure mode being defended against
+# is stale firmware silently timing the *previous* model.
+min_loads = 3
+invokes_per_load = 10
+# Flag a row as unstable rather than trusting a tight-looking median.
+unstable_cv = 0.02
+# On-target vs host int8 cosine.
+ontarget_warn_cos = 0.98
+# Canary drift beyond this quarantines every result in the bracket.
+canary_drift_frac = 0.10
+
+[board]
+loader_retries = 3
+loader_success_marker = "Start operation achieved successfully"
+serial_timeout_s = 120

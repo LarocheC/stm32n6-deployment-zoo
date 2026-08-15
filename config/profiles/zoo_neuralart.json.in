@@ -1,0 +1,134 @@
+// Zoo compilation profiles for the ST Neural-ART NPU compiler (atonn).
+//
+// This is a TEMPLATE. `zoo/st/profiles.py` substitutes {{MPOOL_DIR}} with an
+// absolute path and writes the result under runs/_toolchain/<core>/. That is
+// the whole point: the profiles ST ships use *relative* mpool paths, which is
+// why every command in every prior project on this machine had to start with
+//     cd ~/stedgeai/install/4.0/scripts/N6_scripts
+// Absolute paths are supported (ST's own header says so) and remove that
+// constraint, along with the st_ai_output/ and st_ai_ws/ litter it caused.
+//
+// This file is NOT strict JSON: `//` comments are allowed, per ST's parser.
+//
+// Option notes, all load-bearing:
+//   --all-buffers-info      REQUIRED if the validation stack will be used.
+//                           Every measurable profile must carry it.
+//   --native-float          Floats without quantisation info stay float rather
+//                           than being reinterpreted as fixed point.
+//   --enable-virtual-mem-pools  Convenient, but ST warns it "may have massive
+//                           disruptive effects on inference time". Kept on for
+//                           the screening profiles, off in `tuned-*`.
+//   --cache-maintenance --Ocache-opt   Emit NPU/MCU cache coherency code.
+//                           Missing cache maintenance is the documented top
+//                           cause of garbage NPU output.
+//   --sched-stats / --mapping-recap-file / --csv-file
+//                           Machine-readable scheduling, op-mapping and memory
+//                           traffic dumps. Relative names; the runner sets cwd
+//                           to the per-run output directory. Best-effort: the
+//                           authoritative parse target is network_c_info.json.
+{
+    "Globals": {},
+
+    "Profiles": {
+
+        // ---- Screening ladder -------------------------------------------
+        // zoo tries these in order and records which one first succeeded.
+        // "needs external memory" is itself a headline result.
+
+        // Everything on-chip (~2816 KB across cpuRAM2 + npuRAM3-6). Fastest,
+        // and the only configuration where weight fetches are never a
+        // bottleneck. Most models will not fit.
+        "onchip": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_noextmem.mpool",
+            "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --mapping-recap --mapping-recap-file mapping_recap.txt --sched-stats sched_stats.json --csv-file mem_traffic.csv --num-ops-info"
+        },
+
+        // On-chip + 112 MB octoFlash. Weights stream from flash at roughly a
+        // 1.6x latency cost (measured: 4.40 ms on-chip vs 7.14 ms flash for
+        // the same 1.4 MB ConvFSENet graph). Activations still on-chip.
+        "extflash": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_extflash.mpool",
+            "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --mapping-recap --mapping-recap-file mapping_recap.txt --sched-stats sched_stats.json --csv-file mem_traffic.csv --num-ops-info"
+        },
+
+        // On-chip + 32 MB HexaSPI PSRAM. This is where activations spill, and
+        // spilling activations is the cliff: ST's own measurements show
+        // DeepLabv3 320->416 costing 5.6x, FastDepth 224->320 costing 19.5x.
+        // A model landing here is a result, not a success.
+        "extram": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_extram.mpool",
+            "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --mapping-recap --mapping-recap-file mapping_recap.txt --sched-stats sched_stats.json --csv-file mem_traffic.csv --num-ops-info"
+        },
+
+        // Last rung: every memory available.
+        "allmems": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_allmems.mpool",
+            "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --mapping-recap --mapping-recap-file mapping_recap.txt --sched-stats sched_stats.json --csv-file mem_traffic.csv --num-ops-info"
+        },
+
+        // ---- Gates -------------------------------------------------------
+
+        // Hard "is this graph 100% NPU?" answer. --disable-sw-fallback makes
+        // the compiler fail rather than silently emit a Cortex-M55 software
+        // epoch. Expected to fail for most models; the failure message names
+        // the offending op, which is exactly what we want recorded.
+        "pure-onchip": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_noextmem.mpool",
+            "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --disable-sw-fallback"
+        },
+        "pure-allmems": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_allmems.mpool",
+            "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --disable-sw-fallback"
+        },
+
+        // ---- Experiments -------------------------------------------------
+
+        // Epoch controller. ST's own documentation lists this among the
+        // "recommended default options", and it appears in NONE of the stock
+        // user_neuralart.json profiles -- including the ones eco8-neaixt used
+        // to conclude that latency is epoch-bound and that moving the M55
+        // share onto the NPU was a wash. Offloading epoch launch to the EC is
+        // the direct attack on that wall. Compare against `onchip`/`allmems`.
+        "onchip-ec": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_noextmem.mpool",
+            "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --enable-epoch-controller --mapping-recap --mapping-recap-file mapping_recap.txt --sched-stats sched_stats.json"
+        },
+        "allmems-ec": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_allmems.mpool",
+            "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --enable-epoch-controller --mapping-recap --mapping-recap-file mapping_recap.txt --sched-stats sched_stats.json"
+        },
+
+        // Transformer-friendly. Softmax, GELU and SiLU/Swish all have hardware
+        // mappings that are only reachable with these recognition passes; the
+        // default is a Cortex-M55 software epoch each. On an attention block
+        // that is the difference between "hopeless" and "slow". Used by the
+        // Whisper-encoder spike and anything else with a Softmax.
+        "transformer": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_allmems.mpool",
+            "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --expand-softmax --GELU-recognition --SWISH-recognition --mapping-recap --mapping-recap-file mapping_recap.txt --sched-stats sched_stats.json --csv-file mem_traffic.csv --num-ops-info"
+        },
+
+        // ---- Diagnostics -------------------------------------------------
+        // Used only when chasing a wrong-output bug. Each removes one class of
+        // compiler behaviour so it can be ruled in or out. This trio is what
+        // eventually isolated the "large SW-epoch outputs are corrupted"
+        // defect in the dnsmos work; keeping them named and version-controlled
+        // means the next bisection starts from a known position.
+
+        // No cache-maintenance codegen, no optimisation. Rules out cache.
+        "dbg-nocache": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_allmems.mpool",
+            "options": "--optimization 1 --all-buffers-info --native-float"
+        },
+        // Inputs never aliased to other buffers. Rules out I/O aliasing.
+        "dbg-preserve": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_allmems.mpool",
+            "options": "--optimization 1 --all-buffers-info --native-float --Opreserve-inputs"
+        },
+        // Outputs not allocated by the compiler. Rules out output placement.
+        "dbg-noalias": {
+            "memory_pool": "{{MPOOL_DIR}}/harness_allmems.mpool",
+            "options": "--optimization 1 --all-buffers-info --native-float --no-outputs-allocation"
+        }
+    }
+}

@@ -1,0 +1,45 @@
+# Drafted by `zoo init`. Every TODO is a question the drafter could not
+# answer from the graph — review them before running the funnel.
+schema = 1
+id      = "mobilenet_v2_1.0_224"
+source  = "onnx-community/mobilenet_v2_1.0_224"
+domain  = "vision"
+task    = "image-classification"
+tier    = 1        # 1=screen  2=measure on board  3=firmware demo
+license = "TODO"
+notes   = "lab/mobilenet_v2_1.0_224.md"
+
+[fetch]
+provider = "hf_onnx"
+revision = "main"   # TODO: pin to a commit sha once it screens clean
+
+[[graph]]
+id   = "model"
+file = "onnx/model.onnx"
+# fp32 on disk: 14.0 MB
+realtime_ms = 0.0   # TODO: wall-clock covered by one invocation (for RTF)
+
+[graph.pin]   # TODO: every symbolic dim must be fixed before compiling
+"batch_size" = 1
+
+  [[graph.input]]
+  name  = "pixel_values"
+  role  = "feature"
+  shape = ["batch_size", 3, 224, 224]
+  dtype = "float32"
+  calib = "TODO"   # calibration provider key
+
+  [[graph.output]]
+  name = "logits"
+  # shape ["batch_size", 1001]
+
+[variants]
+profile         = ["onchip", "extflash", "allmems"]
+precision       = ["int8"]
+backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
+policy          = "first_success"
+
+[calibration]
+provider = "synthetic"   # TODO: a real provider is required for tier 2
+n        = 128
+seed     = 0
