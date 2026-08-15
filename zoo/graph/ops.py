@@ -53,9 +53,16 @@ SW = "SW"  # ST writes a bare "SW" for a few ops (e.g. DepthToSpace)
 MIXED = "MIXED"  # e.g. Swish: "SW_FLOAT / HW" depending on recognition passes
 FRONTEND_ONLY = "FRONTEND_ONLY"
 UNSUPPORTED = "UNSUPPORTED"
+PLUMBING = "PLUMBING"
 
 #: Tiers that execute on the Cortex-M55 rather than the accelerator.
 SOFTWARE_TIERS = frozenset({SW, SW_INT, SW_FLOAT})
+
+#: Graph-construction ops that never execute: the front end folds or drops
+#: them. Given their own tier because they are numerous — a Whisper encoder
+#: carries 164 `Constant` nodes — and counting them as "undocumented on the
+#: NPU" would bury the handful of ops that genuinely are.
+PLUMBING_OPS = frozenset({"Constant", "ConstantOfShape", "Identity", "Dropout"})
 
 #: Ops with no usable mapping, whatever the front-end parser claims, each with
 #: the reason it is blocked. These are asserted from evidence rather than
@@ -337,6 +344,8 @@ class OpTable:
         """
         if op in HARD_BLOCKED_OPS:
             return UNSUPPORTED
+        if op in PLUMBING_OPS:
+            return PLUMBING
         key = self._canonical(op)
         if key is not None:
             return self.mapping[key].effective_tier(unlocked=unlocked)

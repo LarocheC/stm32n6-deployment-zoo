@@ -1,0 +1,23 @@
+# Known STM32N6 toolchain failures, keyed by failure class.
+#
+# This file is the zoo's institutional memory. A failure that matches an entry
+# here is a known constraint with a known remedy; one that matches nothing is
+# the discovery queue — either a new constraint to document, or a bug in the
+# harness. Shrinking the unmatched set is the work.
+#
+# Every entry must cite a source. A remedy nobody has actually run is a
+# hypothesis, and belongs in `lab/` until it is not.
+#
+# Fields:
+#   id             stable kebab-case slug
+#   failure_class  the FailureClass this entry explains (one entry per class)
+#   title          one line
+#   cause          why it happens
+#   workaround     what to do about it
+#   patch          graph-patch name, if a rewrite fixes it
+#   zoo_action     lint-rule | graph-patch | compile-postcondition |
+#                  board-invariant | infra-retry | document-only
+#   silent         true if the tool reports success and the result is wrong
+#   sources        absolute paths backing the claim
+
+# Populated by the catalogue mined from ~/dnsmos_exported and ~/eco8-neaixt.

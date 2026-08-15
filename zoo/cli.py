@@ -107,7 +107,7 @@ def cmd_ops(args: argparse.Namespace) -> int:
     print(f"  front-end parser vocabulary: {len(table.frontend)} ops")
     print("\n  tiers:")
     for tier in (omod.HW, omod.MIXED, omod.SW, omod.SW_INT, omod.SW_FLOAT,
-                 omod.FRONTEND_ONLY, omod.UNSUPPORTED):
+                 omod.PLUMBING, omod.FRONTEND_ONLY, omod.UNSUPPORTED):
         if counts.get(tier):
             print(f"    {tier:<16} {counts[tier]:>4}")
 
@@ -184,6 +184,114 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+_SEV_MARK = {"error": "✗", "warn": "!", "info": "·"}
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    from zoo.config import ROOT, load_policy
+    from zoo.graph import lint as lmod
+    from zoo.graph import ops as omod
+    from zoo.graph import probe as pmod
+
+    tc = load_toolchain()
+    table = omod.load(tc)
+    policy = load_policy()
+
+    targets: list[tuple[str, Path, dict]] = []
+    for target in args.target:
+        path = Path(target)
+        if path.suffix == ".onnx" and path.is_file():
+            targets.append((path.name, path, {}))
+            continue
+        # Otherwise treat it as a recipe id or path.
+        from zoo import fetch as fmod
+        from zoo import recipe as recmod
+
+        rpath = path if path.is_file() else None
+        if rpath is None:
+            matches = [p for p in (ROOT / "models").rglob("*.toml") if p.stem == target]
+            if not matches:
+                print(f"  no recipe or ONNX file matching {target!r}", file=sys.stderr)
+                return 2
+            rpath = matches[0]
+        rec = recmod.load(rpath)
+        for graph in rec.graphs:
+            if not graph.enabled:
+                print(f"  ⚪ {rec.id}/{graph.id}: skipped — {graph.skip_reason}")
+                continue
+            remotes = [
+                f for f in fmod.list_hf_onnx(rec.source, rec.revision)
+                if f.filename == graph.file
+            ]
+            if not remotes:
+                print(f"  ✗ {rec.id}/{graph.id}: {graph.file} not found in {rec.source}",
+                      file=sys.stderr)
+                return 2
+            local = fmod.download(remotes[0], rec.revision)
+            targets.append((f"{rec.id}/{graph.id}", local, graph.pin))
+
+    worst = 0
+    for label, path, pin in targets:
+        probe = pmod.probe_file(path)
+        result = lmod.lint(probe, table, policy, pinned=pin, unlocked=args.unlocked)
+
+        status = "PASS" if result.ok else "FAIL"
+        print(f"\n  {label}  [{status}]")
+        counts = {t: sum(g.values()) for t, g in result.census.items()}
+        print(f"      {result.node_count} nodes · tiers {counts}")
+        print(f"      Cortex-M55 instances: {result.sw_instances}"
+              f" (+{result.dynamic_conditional} dynamic MatMul/Gemm)"
+              f" → {result.sw_instances_unlocked} with recognition passes")
+
+        for v in result.violations:
+            if v.severity == "info" and not args.verbose:
+                continue
+            print(f"      {_SEV_MARK.get(v.severity, '?')} [{v.rule}] {v.message}")
+            if v.remedy:
+                print(f"          → {v.remedy}")
+        if result.suggested_patches:
+            print(f"      patches that would help: {', '.join(result.suggested_patches)}")
+        worst = max(worst, 1 if not result.ok else 0)
+
+    print()
+    return worst
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    from zoo.config import ROOT
+    from zoo.store import report as rmod
+    from zoo.store import snapshot as smod
+
+    snap = smod.load_and_fold()
+
+    if args.new_signatures:
+        unknown = [s for s in snap.signatures.values() if not s["known_issue"]]
+        if not unknown:
+            print("\n  no unmatched failure signatures — the catalogue explains everything seen\n")
+            return 0
+        print(f"\n  {len(unknown)} unmatched signature(s) — the discovery queue\n")
+        for sig in sorted(unknown, key=lambda s: -s["count"]):
+            print(f"  ×{sig['count']:<3} {sig['failure_class'] or 'UNKNOWN'}  "
+                  f"[{', '.join(sig['stages'])}]  {', '.join(sig['models'][:5])}")
+            print(f"        {sig['example_error'][:160]}")
+        print()
+        return 0
+
+    recipes = {}
+    try:
+        from zoo import recipe as recmod
+
+        recipes = {r.id: r for r in recmod.discover(ROOT / "models")}
+    except Exception:  # noqa: BLE001 - a broken recipe must not block reporting
+        pass
+
+    snap_path = smod.write(snap)
+    md_path = rmod.write(snap, recipes=recipes)
+    print(f"\n  {snap.total_events} events → {len(snap.graphs)} graph(s)")
+    print(f"  wrote {snap_path.relative_to(ROOT)} and {md_path.relative_to(ROOT)}\n")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zoo",
@@ -221,6 +329,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--stdout", action="store_true", help="print instead of writing")
     p_init.add_argument("--force", action="store_true", help="overwrite an existing recipe")
     p_init.set_defaults(func=cmd_init)
+
+    p_lint = sub.add_parser("lint", help="static screen: reject what cannot work, no ST tool")
+    p_lint.add_argument("target", nargs="+", help="recipe id, recipe path, or .onnx path")
+    p_lint.add_argument("--unlocked", action="store_true",
+                        help="assume the transformer profile's recognition passes are on")
+    p_lint.add_argument("-v", "--verbose", action="store_true", help="show info-level notes")
+    p_lint.set_defaults(func=cmd_lint)
+
+    p_report = sub.add_parser("report", help="fold the event log into RESULTS.md")
+    p_report.add_argument(
+        "--new-signatures",
+        action="store_true",
+        help="list failure signatures with no catalogue entry — the discovery queue",
+    )
+    p_report.set_defaults(func=cmd_report)
 
     return parser
 
