@@ -116,19 +116,38 @@ recovers the complete operator census without downloading: `GraphProto.node` is
 field 1 and `initializer` is field 5, so the nodes land before the weights. 4 MB
 of a 33 MB Whisper encoder is enough for all 495 of its nodes.
 
+## The failure atlas
+
+`zoo/faults/known_issues.toml` holds **82 verified constraints**, mined from two
+prior STM32N6 projects and checked entry by entry against their sources. 32 of
+them are *silent*: the tool reports success and the result is wrong.
+
+The 30 entries carrying a verbatim error signature are live code — `classify()`
+matches them against tool output and returns the workaround, so a recognised
+failure arrives with its remedy rather than just its name. Anything unmatched is
+the discovery queue: `zoo report --new-signatures`.
+
+The catalogue earns its keep. Within minutes of loading it, one entry —
+*"macs silently zero on QDQ graphs"* — identified a real bug in code written an
+hour earlier.
+
 ## Status
 
-Built:
+```
+zoo doctor     23 board-free checks, every tool version-pinned
+zoo profiles   12 compilation profiles, absolute mpool paths
+zoo ops        the operator oracle
+zoo init       draft a recipe from a Hugging Face id
+zoo lint       static screen, with a remedy per violation
+zoo screen     the full board-free funnel over every recipe
+zoo report     fold the event log into RESULTS.md
+```
 
-- toolchain discovery, version pinning and `zoo doctor` (23 checks, board-free)
-- profile materialisation with absolute mpool paths, and the mpool parser
-- the operator oracle (`zoo ops`)
-- the ONNX probe — local full parse and remote head scan, transitive constant
-  propagation for the `MatMul`/`Gemm`/`Conv` operand question, subgraph op
-  counting so a control-flow wrapper cannot masquerade as a one-node graph
-- the recipe schema and the `zoo init` auto-drafter
-- the fetch layer for plain Hugging Face blobs
+Built: toolchain discovery and pinning · operator oracle · ONNX probe (local
+and remote head-scan) · recipe schema and auto-drafter · fetch layer · results
+store and leaderboard · fault catalogue and classifier · static lint · graph
+patches with a parity gate · memory budget · funnel orchestration · static QDQ
+int8 quantisation with calibration providers.
 
-Next: the results store (`results/events.jsonl` and the derived leaderboard),
-then the static funnel — lint → shape → patch → budget. See `.claude/plans/`
-for the full plan.
+Next: the compile stage (`stedgeai generate`, parsing `network_c_info.json`),
+then the board stage. See `.claude/plans/` for the full plan.
