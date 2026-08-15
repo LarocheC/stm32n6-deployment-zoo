@@ -351,57 +351,45 @@
   {
    "best": {
     "blocked_by": "",
-    "deepest_stage": "budget",
+    "deepest_stage": "board",
     "failure_class": "",
     "graph_id": "mnist-12",
     "is_infra_last": false,
     "metrics": {
-     "applied": [
-      "constant_fold"
+     "activations_bytes": 14112,
+     "ec_blobs": 0,
+     "epochs_hw": 8,
+     "epochs_nox": 2,
+     "epochs_sw": 0,
+     "epochs_total": 10,
+     "io_bytes": 0,
+     "ladder": [
+      {
+       "ok": true,
+       "profile": "onchip"
+      }
      ],
-     "bytes": 26143,
-     "changed": 0,
-     "dynamic_conditional": 0,
-     "errors": 0,
-     "folded_constants": [],
-     "hf_revision": "main",
-     "io_bytes": 3176,
-     "ir_version": 7,
-     "is_quantised": false,
-     "macs": 786560,
-     "max_rank": 4,
-     "max_tensor_dim": 28,
-     "nodes": 8,
-     "ops_frontend_only": 0,
-     "ops_npu": 8,
-     "ops_sw": 0,
-     "ops_sw_unlocked": 0,
-     "ops_unsupported": 0,
-     "opset": 12,
-     "parity_unverified": [],
-     "peak_activation_fused": 50176,
-     "peak_activation_raw": 50176,
-     "pinned": {},
-     "placement": "all-on-chip",
-     "pre_patch_violations": [],
-     "quantised_weight_bytes": 23992,
-     "rejected": [],
-     "requested": [
-      "constant_fold"
-     ],
-     "subgraph_nodes": 0,
-     "suggested_patches": [],
-     "unresolved_tensors": 0,
-     "violations": [],
-     "warnings": 0,
-     "weight_bytes": 23992,
-     "weight_bytes_raw": 24008
+     "latency_ms": 0.106,
+     "latency_ms_median": 0.106,
+     "macc_total": 796885,
+     "ontarget_cos": 0.999978,
+     "pool_placement": "all-on-chip",
+     "pools": {
+      "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 1972225,
+      "npuRAM4": 14112,
+      "npuRAM5": 6145
+     },
+     "predicted_ms": 0.020246,
+     "predicted_vs_measured": 5.2356020942408374,
+     "profile_used": "onchip",
+     "sw_epoch_ops": {},
+     "weights_bytes": 6145
     },
     "model_id": "inference-engine-mnist-12",
     "signature": "",
-    "ts": "2026-08-15T11:48:29Z",
-    "variant_id": "",
-    "verdict": "SCREENED"
+    "ts": "2026-08-15T12:05:47Z",
+    "variant_id": "onchip/int8/in-f32/npu",
+    "verdict": "MEASURED"
    },
    "graph_id": "mnist-12",
    "infra_events": 0,
@@ -409,7 +397,7 @@
    "variants": {
     "": {
      "blocked_by": "",
-     "deepest_stage": "budget",
+     "deepest_stage": "quantize",
      "failure_class": "",
      "graph_id": "mnist-12",
      "is_infra_last": false,
@@ -417,12 +405,19 @@
       "applied": [
        "constant_fold"
       ],
+      "audit_failures": [],
       "bytes": 26143,
+      "calibration_provider": "synthetic",
+      "calibration_samples": 0,
+      "calibration_synthetic": true,
       "changed": 0,
       "dynamic_conditional": 0,
       "errors": 0,
       "folded_constants": [],
       "hf_revision": "main",
+      "int8_cos": 0.9993662765313862,
+      "int8_mae": 0.07974832076579333,
+      "int8_max_abs": 0.26686060428619385,
       "io_bytes": 3176,
       "ir_version": 7,
       "is_quantised": false,
@@ -439,10 +434,16 @@
       "parity_unverified": [],
       "peak_activation_fused": 50176,
       "peak_activation_raw": 50176,
+      "per_channel": false,
       "pinned": {},
       "placement": "all-on-chip",
       "pre_patch_violations": [],
+      "quant_notes": [
+       "upgraded opset 12 -> 13 before quantising; per-channel DequantizeLinear needs the axis attribute, which opset 13 introduced",
+       "fell back to per-tensor weights: ORT's per-channel int32-bias adjustment cannot handle this graph's bias shapes. ST's scheme is per-channel, so expect worse accuracy than the same model would reach elsewhere \u2014 especially on depthwise convolutions"
+      ],
       "quantised_weight_bytes": 23992,
+      "quantize_ops": 7,
       "rejected": [],
       "requested": [
        "constant_fold"
@@ -450,19 +451,65 @@
       "subgraph_nodes": 0,
       "suggested_patches": [],
       "unresolved_tensors": 0,
+      "upgraded_opset_from": 12,
       "violations": [],
       "warnings": 0,
       "weight_bytes": 23992,
-      "weight_bytes_raw": 24008
+      "weight_bytes_fp32": 23992,
+      "weight_bytes_int8": 6171,
+      "weight_bytes_raw": 24008,
+      "weight_compression": 3.8878625830497486
      },
      "model_id": "inference-engine-mnist-12",
      "signature": "",
-     "ts": "2026-08-15T11:48:29Z",
+     "ts": "2026-08-15T12:05:34Z",
      "variant_id": "",
-     "verdict": "SCREENED"
+     "verdict": "QUANTIZES"
+    },
+    "onchip/int8/in-f32/npu": {
+     "blocked_by": "",
+     "deepest_stage": "board",
+     "failure_class": "",
+     "graph_id": "mnist-12",
+     "is_infra_last": false,
+     "metrics": {
+      "activations_bytes": 14112,
+      "ec_blobs": 0,
+      "epochs_hw": 8,
+      "epochs_nox": 2,
+      "epochs_sw": 0,
+      "epochs_total": 10,
+      "io_bytes": 0,
+      "ladder": [
+       {
+        "ok": true,
+        "profile": "onchip"
+       }
+      ],
+      "latency_ms": 0.106,
+      "latency_ms_median": 0.106,
+      "macc_total": 796885,
+      "ontarget_cos": 0.999978,
+      "pool_placement": "all-on-chip",
+      "pools": {
+       "cpuRAM2_npuRAM3_npuRAM4_npuRAM5_npuRAM6": 1972225,
+       "npuRAM4": 14112,
+       "npuRAM5": 6145
+      },
+      "predicted_ms": 0.020246,
+      "predicted_vs_measured": 5.2356020942408374,
+      "profile_used": "onchip",
+      "sw_epoch_ops": {},
+      "weights_bytes": 6145
+     },
+     "model_id": "inference-engine-mnist-12",
+     "signature": "",
+     "ts": "2026-08-15T12:05:47Z",
+     "variant_id": "onchip/int8/in-f32/npu",
+     "verdict": "MEASURED"
     }
    },
-   "verdict": "SCREENED"
+   "verdict": "MEASURED"
   },
   {
    "best": {
@@ -743,5 +790,5 @@
    ]
   }
  },
- "total_events": 35
+ "total_events": 38
 }

@@ -412,3 +412,129 @@ def screen(recipe: Recipe, ctx: Context, *, unlocked: bool = False) -> list[Even
     for graph in recipe.graphs:
         events += screen_graph(recipe, graph, ctx, unlocked=unlocked)
     return events
+
+
+# ---------------------------------------------------------------------------
+# Board-attached stages
+# ---------------------------------------------------------------------------
+
+
+def stage_quantize(prepared: Path, out: Path, recipe: Recipe, graph: GraphSpec) -> StageOutcome:
+    import time as _time
+
+    from zoo.quant import qdq
+    from zoo.quant.calib import CalibrationSpec
+
+    started = _time.monotonic()
+    spec = CalibrationSpec(
+        provider=recipe.calibration.provider,
+        n=recipe.calibration.n,
+        seed=recipe.calibration.seed,
+        source=recipe.calibration.dataset,
+    )
+    roles = {s.name: s.role for s in graph.inputs}
+    result = qdq.quantize(prepared, out, calibration=spec, roles=roles)
+    return StageOutcome(
+        Stage.QUANTIZE,
+        Status.PASS if result.ok else Status.FAIL,
+        metrics=result.metrics(),
+        failure_class="" if result.ok else FC.QUANT_FAILED,
+        error=result.error or "; ".join(result.audit_failures),
+        artifacts=[str(out)] if result.path else [],
+        duration_s=_time.monotonic() - started,
+        payload=result,
+    )
+
+
+def stage_generate(tc: Toolchain, model: Path, base: Path, graph: GraphSpec) -> StageOutcome:
+    from zoo.st import generate as gmod
+
+    best, attempts = gmod.generate_ladder(
+        tc, model, base, fix_shapes=graph.fix_parametric_shapes()
+    )
+    metrics = best.metrics()
+    metrics["ladder"] = [{"profile": a.profile, "ok": a.ok} for a in attempts]
+    return StageOutcome(
+        Stage.GENERATE,
+        Status.PASS if best.ok else Status.FAIL,
+        metrics=metrics,
+        failure_class="" if best.ok else FC.CODEGEN_ERROR,
+        error="" if best.ok else best.error,
+        artifacts=[str(best.out_dir)],
+        duration_s=sum(a.duration_s for a in attempts),
+        payload=best,
+    )
+
+
+def stage_board(tc: Toolchain, compiled, model: Path, graph: GraphSpec) -> StageOutcome:
+    """Load the network and measure it, refusing to measure the wrong thing."""
+    import time as _time
+
+    from zoo.board import link, measure
+
+    started = _time.monotonic()
+    try:
+        link.preflight(tc)
+    except Exception as exc:  # noqa: BLE001
+        return StageOutcome(
+            Stage.BOARD, Status.FAIL, failure_class=FC.BOARD_NOT_ATTACHED,
+            error=f"{type(exc).__name__}: {exc}", duration_s=_time.monotonic() - started,
+        )
+
+    loaded = measure.load_network(tc, compiled.out_dir / "network.c", log_dir=compiled.out_dir)
+    if not loaded.ok:
+        # No success marker means the previous firmware is still resident.
+        # Measuring now would time the wrong model and look entirely fine.
+        return StageOutcome(
+            Stage.BOARD, Status.FAIL, failure_class=FC.LOADER_NO_SUCCESS_MARKER,
+            error=loaded.error, duration_s=_time.monotonic() - started,
+        )
+
+    result = measure.validate(
+        tc, model, profile=compiled.profile, out_dir=compiled.out_dir / "val",
+        fix_shapes=graph.fix_parametric_shapes(),
+    )
+    metrics = result.metrics()
+    metrics["latency_ms_median"] = result.latency_ms
+    metrics["profile_used"] = compiled.profile
+    if compiled.info and result.latency_ms:
+        predicted = compiled.info.predicted_ms()
+        if predicted:
+            metrics["predicted_ms"] = predicted
+            metrics["predicted_vs_measured"] = result.latency_ms / predicted
+    return StageOutcome(
+        Stage.BOARD,
+        Status.PASS if result.ok else Status.FAIL,
+        metrics=metrics,
+        failure_class="" if result.ok else FC.TARGET_HANG,
+        error="" if result.ok else result.error,
+        duration_s=_time.monotonic() - started,
+        payload=result,
+    )
+
+
+def measure_graph(recipe: Recipe, graph: GraphSpec, ctx: Context) -> list[Event]:
+    """Quantise, compile and measure a graph that has already screened clean."""
+    events: list[Event] = []
+    scratch = workdir_for(recipe, graph)
+    prepared = scratch / "prepared.onnx"
+    if not prepared.is_file():
+        events += screen_graph(recipe, graph, ctx)
+        if not prepared.is_file():
+            return events
+
+    quantised = scratch / "int8.onnx"
+    q = stage_quantize(prepared, quantised, recipe, graph)
+    events.append(_emit(ctx, recipe, graph, q))
+    if q.status != Status.PASS:
+        return events
+
+    g = stage_generate(ctx.toolchain, quantised, scratch / "compile", graph)
+    variant = ids.variant_id(profile=g.metrics.get("profile_used", "?"))
+    events.append(_emit(ctx, recipe, graph, g, variant=variant))
+    if g.status != Status.PASS:
+        return events
+
+    b = stage_board(ctx.toolchain, g.payload, quantised, graph)
+    events.append(_emit(ctx, recipe, graph, b, variant=variant))
+    return events

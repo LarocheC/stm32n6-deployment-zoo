@@ -213,7 +213,12 @@ def _signature_pattern(signature: str) -> re.Pattern[str]:
     """
     cached = _SIG_CACHE.get(signature)
     if cached is None:
-        cached = re.compile(re.escape(signature).replace(r"\*", r".*?"), re.I)
+        # Whitespace-insensitive. Signatures were stored with newlines
+        # collapsed to spaces, while real tool output spans lines — matching
+        # literally meant a two-line signature could never fire, which is how
+        # a documented fault reached the board as an unexplained one.
+        parts = [re.escape(tok).replace(r"\*", r".*?") for tok in signature.split()]
+        cached = re.compile(r"\s+".join(parts), re.I)
         _SIG_CACHE[signature] = cached
     return cached
 

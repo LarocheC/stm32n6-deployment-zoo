@@ -313,6 +313,53 @@ def cmd_screen(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def cmd_measure(args: argparse.Namespace) -> int:
+    import subprocess
+
+    from zoo import funnel as fmod
+    from zoo import recipe as recmod
+    from zoo.config import ROOT, load_policy
+    from zoo.graph import ops as omod
+    from zoo.store.events import EventLog
+    from zoo.store.schema import Status
+
+    tc = load_toolchain()
+    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
+                            capture_output=True, text=True, check=False).stdout.strip()
+    ctx = fmod.Context(toolchain=tc, table=omod.load(tc), policy=load_policy(),
+                       log=EventLog(), zoo_commit=commit)
+
+    recipes = recmod.discover(ROOT / "models")
+    if args.only:
+        recipes = [r for r in recipes if r.id in set(args.only)]
+    if not recipes:
+        print("  no matching recipe", file=sys.stderr)
+        return 2
+
+    failed = 0
+    print(f"\nmeasuring {len(recipes)} recipe(s) — run {ctx.run_id}\n")
+    for rec in recipes:
+        for graph in rec.enabled_graphs:
+            events = fmod.measure_graph(rec, graph, ctx)
+            last = events[-1] if events else None
+            ok = last is not None and last.status == Status.PASS
+            print(f"  {'✓' if ok else '✗'} {rec.id}/{graph.id:<22} reached {last.stage if last else '—'}")
+            for ev in events:
+                if ev.status == Status.PASS and ev.metrics.get("latency_ms"):
+                    m = ev.metrics
+                    print(f"        {m['latency_ms']} ms · cos {m.get('ontarget_cos')} · "
+                          f"{m.get('profile_used')}"
+                          + (f" · predicted {m['predicted_ms']:.4f} ms "
+                             f"(x{m['predicted_vs_measured']:.1f})" if m.get("predicted_ms") else ""))
+                elif ev.status != Status.PASS and ev.error:
+                    tag = "INFRA " if ev.is_infra else ""
+                    print(f"        [{ev.stage}] {tag}{ev.failure_class} {ev.error[:120]}")
+            if not ok:
+                failed += 1
+    print(f"\n  run `zoo report` to fold {len(ctx.log.read_all())} events into RESULTS.md\n")
+    return 1 if failed else 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     from zoo.config import ROOT
     from zoo.store import report as rmod
@@ -400,6 +447,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_screen.add_argument("--unlocked", action="store_true",
                           help="assume the transformer profile's recognition passes")
     p_screen.set_defaults(func=cmd_screen)
+
+    p_measure = sub.add_parser(
+        "measure", help="quantise, compile and measure on the board (needs hardware)"
+    )
+    p_measure.add_argument("--only", nargs="*", help="restrict to these recipe ids")
+    p_measure.set_defaults(func=cmd_measure)
 
     p_report = sub.add_parser("report", help="fold the event log into RESULTS.md")
     p_report.add_argument(
