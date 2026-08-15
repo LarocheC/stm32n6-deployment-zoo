@@ -359,8 +359,10 @@ def cmd_measure(args: argparse.Namespace) -> int:
     print(f"\nmeasuring {len(recipes)} recipe(s) — run {ctx.run_id} — "
           f"{cfg.get('min_loads', 3)} load(s) x {cfg.get('invokes_per_load', 10)} invoke(s)\n")
 
+    wanted_graphs = set(args.graph or [])
     for rec in recipes:
-        for graph in rec.enabled_graphs:
+        graphs = [g for g in rec.enabled_graphs if not wanted_graphs or g.id in wanted_graphs]
+        for graph in graphs:
             def _progress(reading, _rec=rec, _g=graph) -> None:
                 if reading.ok:
                     spread = (
@@ -495,6 +497,12 @@ def build_parser() -> argparse.ArgumentParser:
         "measure", help="quantise, compile and measure on the board (needs hardware)"
     )
     p_measure.add_argument("--only", nargs="*", help="restrict to these recipe ids")
+    p_measure.add_argument(
+        "--graph", nargs="*",
+        help="restrict to these graph ids. A recipe with several graphs otherwise "
+             "costs a full pass to re-measure one of them, which on a bench that "
+             "wedges every few loads is most of a session",
+    )
     p_measure.add_argument(
         "--loads", type=int,
         help="full reloads per row (default: policy min_loads). Below the policy "

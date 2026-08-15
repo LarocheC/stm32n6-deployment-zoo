@@ -9,13 +9,11 @@ on-chip.
 Three of the four are now answered, and one of the answers is the opposite of
 what was expected.
 
-> **Partly measured.** The ST-LINK was wedged when this pass started; after a
-> physical replug it ran the gate over three graphs and then wedged again,
-> mid-session, after nine loads. So `mnist-12` and both `yunet` rows are
-> measured under the full policy, and `handpose`, `pphumanseg`, `mobilenet` and
-> the Whisper encoder are still waiting — their attempts are recorded as infra
-> failures and excluded from every verdict, which is the fold's one editorial
-> rule doing its job. Where a claim needs the board, it says whether it has it.
+> **Measured.** Every graph in the zoo now carries a board number taken under
+> the full policy — 7 rows, all `trusted`, none stale. It took four physical
+> replugs to get there: the probe wedged after 9, 8, ~10 and ~11 loads, and the
+> attempts lost to it are recorded as infra failures and excluded from every
+> verdict, which is the fold's one editorial rule doing its job.
 
 ## 1. The determinism gate
 
@@ -73,13 +71,13 @@ degree:
 
 | graph | median | across-load CV | within-load std | gate |
 |---|---:|---:|---:|---|
-| mnist-12 | 0.105 ms | 0.55% | 0.004 | trusted |
-| yunet @640 | 163.760 ms | 0.0004% | 0.004 | trusted |
-| yunet @320 | 6.342 ms | 0.00% | 0.004 | trusted |
+| mnist-12 | 0.104 ms | 0.55% | 0.004 | trusted |
+| yunet @320 | 6.342 ms | 0.01% | 0.004 | trusted |
 | handpose @224 | 10.298 ms | 0.006% | 0.004 | trusted |
 | mobilenet_v2 @224 | 22.107 ms | 0.002% | 0.005 | trusted |
+| pphumanseg @192 | 56.220 ms | 0.05% | 0.102 | trusted |
+| yunet @640 | 163.760 ms | 0.0004% | 0.004 | trusted |
 | whisper encoder @5 s | 10,935.052 ms | 0.05% | 9.6 | trusted |
-| pphumanseg @192 | 56.136 ms | — | 0.094 | **insufficient** (1 of 3 loads) |
 
 Three independent firmware reloads of a 163 ms network reproduce it to the
 third decimal. That is worth knowing precisely because it was not knowable
@@ -89,12 +87,14 @@ a wedged probe, a superseded artifact. Those are exactly the failures a
 repeated-invoke policy would not have caught and a repeated-*reload* policy
 does.
 
-**pphumanseg is the gate paying for itself.** Its first load returned 56.136 ms
-— close enough to the 55.01 ms this document's predecessor published that it
-would have been waved through. Loads 2 and 3 then failed the success marker
-three attempts each, so the row is recorded as `insufficient`, keeps its
-number, and does not claim to be evidence. Under the old single-shot policy
-that first load *was* the row.
+**pphumanseg is the gate paying for itself.** On its first attempt load 1
+returned 56.136 ms — close enough to the 55.01 ms this document's predecessor
+published that it would have been waved through — and then loads 2 and 3 failed
+the success marker three attempts each. The row sat as `insufficient` for a
+session, keeping its number and claiming nothing, until a clean window produced
+56.171 / 56.220 / 56.221. Under the old single-shot policy that first load
+*was* the row; under this one it was a hypothesis that happened to be right,
+and the difference was not knowable at the time.
 
 **The free within-load spread turns out to detect software epochs.** Every
 pure-hardware graph reports a within-load std of 0.004–0.005 ms regardless of
@@ -322,9 +322,15 @@ estimate is nearly right, because there is no longer anything to wait for.
 
 Re-measured with `-vi`, yunet @640's on-target cosine goes **0.8527 → 0.9689**,
 which is the mismatch hypothesis confirmed on hardware: the model was never the
-problem, the `[0, 1]` validation data was. The 320 row got one good load at
-0.8588 before the probe wedged, so it is currently `insufficient` and owes two
-more loads.
+problem, the `[0, 1]` validation data was.
+
+The 320 row, measured the same way, sits at **0.8589** — reproduced to six
+digits across two sessions, so it is a real property and not noise. Its *host*
+int8 cosine is 0.9979, essentially identical to 640's 0.9974, so the extra
+divergence appears only on device and only at the lower resolution. That is an
+open question rather than a finding; it is recorded here so that the next
+person does not read the 320 row's cosine as a quantisation problem, which the
+host numbers say it is not.
 
 ## 4. The Whisper encoder: int8 made it worse
 
@@ -436,7 +442,7 @@ the zoo exists to record rather than discover in a demo.
 
 | ask | status |
 |---|---|
-| determinism gates | implemented and run: 6 rows trusted (CV ≤ 0.55%), 2 caught as `insufficient` rather than published. Every graph in the zoo now has a board number |
+| determinism gates | implemented and run to completion: **all 7 graphs trusted**, across-load CV ≤ 0.55%. Two rows spent a session as `insufficient` rather than being published on one load |
 | real calibration | done for all five vision graphs and the Whisper encoder; both corpora materialised locally; fidelity measured on held-out real data at host *and* on target. handpose 0.888, mobilenet 0.995 — the first on-target numbers here that are accuracies rather than self-agreement |
 | yunet @320 | **163.76 → 6.34 ms**, on-chip, 3×10 trusted; 1,139 KB against ST's 1,130 KB and 6.34 ms against ST's 6.74 ms |
 | Whisper 5 s int8 | answered, negatively, twice over: int8 doubles the activation footprint rather than quartering it, and the measured encoder runs at **RTF 2.19** — 10.9 s for a 5 s window, ×98 the prediction |
@@ -454,18 +460,26 @@ rejected model and the rest of the pipeline.
 
 ## Next
 
-1. **Two rows still owe loads**: pphumanseg and yunet @320 are both sitting at
-   1 of 3, each needing one clean window. mnist-12 is marked stale because the
-   canary build re-quantised it after its measurement, so it wants a re-run
-   too — cheapest row in the zoo, 33 seconds.
-2. Find out why 72 constant-weight 1×1 convolutions land in software epochs on
-   the Whisper encoder.
-3. pphumanseg's 15 software epochs (`Resize`) now have a second symptom worth
-   chasing: they are also the only source of within-load variance in the zoo.
+1. Find out why 72 constant-weight 1×1 convolutions land in software epochs on
+   the Whisper encoder. It is the difference between a memory-bound encoder and
+   130 ms of Cortex-M55, and it is the largest single lever left in the zoo.
+2. pphumanseg's 15 software epochs (`Resize`) now have two symptoms worth
+   chasing: a ×3.3 prediction gap, and twenty times the within-load dispersion
+   of any pure-hardware graph.
+3. Why yunet @320 diverges more on device than @640 (0.8589 against 0.9689)
+   while their host int8 cosines are indistinguishable.
+4. Promotion. yunet @320 (6.34 ms, on-chip, 0.19 of a 30 fps frame budget) and
+   handpose (10.30 ms, 0.31) are the candidates for a tier-3 firmware demo with
+   live camera I/O. Nothing in the zoo is `DEPLOYED` yet; everything is
+   `MEASURED`.
 
 A note on the bench for whoever runs this next. Across four sessions the probe
 wedged after 9, 8, ~10 and ~11 loads, always with the same `DEV_USB_COMM_ERR`,
-always needing a physical replug. Budget two rows per replug. The bracket now
+always needing a physical replug; the fifth session ran 12 loads clean, so the
+count is a tendency rather than a rule. Budget two rows per replug, and use
+`zoo measure --graph <id>` to re-measure one graph of a multi-graph recipe —
+without it, refreshing yunet @320 costs a full pass over @640 as well, which is
+half a session. The bracket now
 re-checks probe health after any failed load and abandons the row instead of
 spending `loader_retries` attempts per remaining load on a probe that cannot
 answer; that fired for the first time on yunet @320 and turned what would have
