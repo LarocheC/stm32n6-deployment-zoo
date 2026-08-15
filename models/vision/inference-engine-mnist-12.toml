@@ -1,0 +1,45 @@
+# Drafted by `zoo init`. Every TODO is a question the drafter could not
+# answer from the graph — review them before running the funnel.
+schema = 1
+id      = "inference-engine-mnist-12"
+source  = "unity/inference-engine-mnist-12"
+domain  = "vision"
+task    = "image-classification"
+tier    = 1        # 1=screen  2=measure on board  3=firmware demo
+license = "mit"
+notes   = "lab/inference-engine-mnist-12.md"
+
+# The five-minute smoke test: proves fetch -> screen -> compile -> load -> validate
+# end to end. Not interesting as a model; indispensable as a canary.
+
+[fetch]
+provider = "hf_onnx"
+revision = "main"   # TODO: pin to a commit sha once it screens clean
+
+[[graph]]
+id   = "mnist-12"
+file = "models/mnist-12.onnx"
+# fp32 on disk: 0.0 MB
+realtime_ms = 0.0   # not a streaming model; RTF is not meaningful
+
+  [[graph.input]]
+  name  = "Input3"
+  role  = "feature"
+  shape = [1, 1, 28, 28]
+  dtype = "float32"
+  calib = "synthetic"   # TODO: real images before any tier-2 promotion
+
+  [[graph.output]]
+  name = "Plus214_Output_0"
+  # shape [1, 10]
+
+[variants]
+profile         = ["onchip", "extflash", "allmems"]
+precision       = ["int8"]
+backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
+policy          = "first_success"
+
+[calibration]
+provider = "synthetic"   # TODO: a real provider is required for tier 2
+n        = 128
+seed     = 0

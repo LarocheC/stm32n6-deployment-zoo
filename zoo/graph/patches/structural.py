@@ -247,6 +247,14 @@ def constant_fold(model: Any) -> tuple[Any, PatchResult]:
     """
     try:
         from onnxsim import simplify
+
+        # onnxsim builds its own ONNX Runtime sessions to fold constants, and
+        # they log failures straight to fd 2. Silence the runtime before the
+        # first one rather than after, or the noise arrives before any parity
+        # check has had a chance to quiet it.
+        from zoo.graph.parity import silence_ort
+
+        silence_ort()
     except ImportError:
         return model, PatchResult(
             "constant_fold", applied=False, note="onnxsim not installed"

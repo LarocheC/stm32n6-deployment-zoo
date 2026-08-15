@@ -1,0 +1,42 @@
+# Drafted by `zoo init`. Every TODO is a question the drafter could not
+# answer from the graph — review them before running the funnel.
+schema = 1
+id      = "human_segmentation_pphumanseg"
+source  = "opencv/human_segmentation_pphumanseg"
+domain  = "vision"
+task    = "image-segmentation"
+tier    = 1        # 1=screen  2=measure on board  3=firmware demo
+license = "unknown"
+notes   = "lab/human_segmentation_pphumanseg.md"
+
+[fetch]
+provider = "hf_onnx"
+revision = "main"   # TODO: pin to a commit sha once it screens clean
+
+[[graph]]
+id   = "human-segmentation-pphumanseg-2023mar"
+file = "human_segmentation_pphumanseg_2023mar.onnx"
+# fp32 on disk: 6.2 MB
+realtime_ms = 33.3   # one camera frame at 30 fps
+
+  [[graph.input]]
+  name  = "x"
+  role  = "feature"
+  shape = [1, 3, 192, 192]
+  dtype = "float32"
+  calib = "synthetic"   # TODO: real images before any tier-2 promotion
+
+  [[graph.output]]
+  name = "save_infer_model/scale_0.tmp_1"
+  # shape [1, 2, 192, 192]
+
+[variants]
+profile         = ["onchip", "extflash", "allmems"]
+precision       = ["int8"]
+backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
+policy          = "first_success"
+
+[calibration]
+provider = "synthetic"   # TODO: a real provider is required for tier 2
+n        = 128
+seed     = 0

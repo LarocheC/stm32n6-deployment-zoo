@@ -45,7 +45,7 @@ class Parity:
 _SILENCED = False
 
 
-def _silence_ort() -> None:
+def silence_ort() -> None:
     """Stop ONNX Runtime writing session-init failures straight to fd 2.
 
     Failing to build a session is a normal, expected outcome here — a graph
@@ -71,7 +71,7 @@ def _silence_ort() -> None:
 def _session(model_bytes: bytes):  # noqa: ANN202
     import onnxruntime as ort
 
-    _silence_ort()
+    silence_ort()
     options = ort.SessionOptions()
     options.log_severity_level = 3
     # Single-threaded on purpose. Int8 graphs with max-pool ties route

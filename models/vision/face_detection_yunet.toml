@@ -1,0 +1,90 @@
+# Drafted by `zoo init`. Every TODO is a question the drafter could not
+# answer from the graph — review them before running the funnel.
+schema = 1
+id      = "face_detection_yunet"
+source  = "opencv/face_detection_yunet"
+domain  = "vision"
+task    = "face-detection"
+tier    = 1        # 1=screen  2=measure on board  3=firmware demo
+license = "unknown"
+notes   = "lab/face_detection_yunet.md"
+
+# NOTE: 640x640 gives a 12.8 MB fp32 activation peak (~3.2 MB int8), above the
+# ~2.8 MB on-chip pool. Re-export at 320x320 before promoting: ST measured this
+# model at 320 with 1130 KB activation and 6.74 ms on this board.
+
+[fetch]
+provider = "hf_onnx"
+revision = "main"   # TODO: pin to a commit sha once it screens clean
+
+[[graph]]
+id   = "face-detection-yunet-2023mar"
+file = "face_detection_yunet_2023mar.onnx"
+# fp32 on disk: 0.2 MB
+realtime_ms = 33.3   # one camera frame at 30 fps
+
+  [[graph.input]]
+  name  = "input"
+  role  = "feature"
+  shape = [1, 3, 640, 640]
+  dtype = "float32"
+  calib = "synthetic"   # TODO: real images before any tier-2 promotion
+
+  [[graph.output]]
+  name = "cls_8"
+  # shape [1, 6400, 1]
+
+  [[graph.output]]
+  name = "cls_16"
+  # shape [1, 1600, 1]
+
+  [[graph.output]]
+  name = "cls_32"
+  # shape [1, 400, 1]
+
+  [[graph.output]]
+  name = "obj_8"
+  # shape [1, 6400, 1]
+
+  [[graph.output]]
+  name = "obj_16"
+  # shape [1, 1600, 1]
+
+  [[graph.output]]
+  name = "obj_32"
+  # shape [1, 400, 1]
+
+  [[graph.output]]
+  name = "bbox_8"
+  # shape [1, 6400, 4]
+
+  [[graph.output]]
+  name = "bbox_16"
+  # shape [1, 1600, 4]
+
+  [[graph.output]]
+  name = "bbox_32"
+  # shape [1, 400, 4]
+
+  [[graph.output]]
+  name = "kps_8"
+  # shape [1, 6400, 10]
+
+  [[graph.output]]
+  name = "kps_16"
+  # shape [1, 1600, 10]
+
+  [[graph.output]]
+  name = "kps_32"
+  # shape [1, 400, 10]
+
+[variants]
+profile         = ["onchip", "extflash", "allmems"]
+precision       = ["int8"]
+backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
+policy          = "first_success"
+
+[calibration]
+provider = "synthetic"   # TODO: a real provider is required for tier 2
+n        = 128
+seed     = 0

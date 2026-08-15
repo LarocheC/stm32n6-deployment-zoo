@@ -1,0 +1,57 @@
+# Drafted by `zoo init`. Every TODO is a question the drafter could not
+# answer from the graph — review them before running the funnel.
+schema = 1
+id      = "handpose_estimation_mediapipe"
+source  = "opencv/handpose_estimation_mediapipe"
+domain  = "vision"
+task    = "keypoint-detection"
+tier    = 1        # 1=screen  2=measure on board  3=firmware demo
+license = "unknown"
+notes   = "lab/handpose_estimation_mediapipe.md"
+
+# NOTE: input is already NHWC, so it pairs with --inputs-ch-position chlast and
+# the camera pipe can write the network input with no CPU conversion.
+
+[fetch]
+provider = "hf_onnx"
+revision = "main"   # TODO: pin to a commit sha once it screens clean
+
+[[graph]]
+id   = "handpose-estimation-mediapipe-2023feb"
+file = "handpose_estimation_mediapipe_2023feb.onnx"
+# fp32 on disk: 4.1 MB
+realtime_ms = 33.3   # one camera frame at 30 fps
+
+  [[graph.input]]
+  name  = "input_1"
+  role  = "feature"
+  shape = [1, 224, 224, 3]
+  dtype = "float32"
+  calib = "synthetic"   # TODO: real images before any tier-2 promotion
+
+  [[graph.output]]
+  name = "Identity"
+  # shape [1, 63]
+
+  [[graph.output]]
+  name = "Identity_1"
+  # shape [1, 1]
+
+  [[graph.output]]
+  name = "Identity_2"
+  # shape [1, 1]
+
+  [[graph.output]]
+  name = "Identity_3"
+  # shape [1, 63]
+
+[variants]
+profile         = ["onchip", "extflash", "allmems"]
+precision       = ["int8"]
+backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
+policy          = "first_success"
+
+[calibration]
+provider = "synthetic"   # TODO: a real provider is required for tier 2
+n        = 128
+seed     = 0
