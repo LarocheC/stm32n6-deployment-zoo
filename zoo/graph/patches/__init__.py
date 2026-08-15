@@ -112,7 +112,4 @@ def get(name: str) -> Patch:
 
 
 # Importing the modules is what populates the registry.
-from zoo.graph.patches import (
-    sequence,  # noqa: E402,F401
-    structural,  # noqa: E402,F401
-)
+from zoo.graph.patches import sequence, structural  # noqa: E402, F401

@@ -14,7 +14,7 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from zoo.graph import budget as bmod
-from zoo.graph.patches import sequence, structural
+from zoo.graph.patches import sequence
 
 POLICY = {
     "budget": {
