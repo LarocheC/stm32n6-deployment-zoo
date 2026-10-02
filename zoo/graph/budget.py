@@ -56,6 +56,11 @@ _ELEM_BYTES = {
 #: new buffer the accelerator must materialise.
 _QDQ = ("QuantizeLinear", "DequantizeLinear")
 
+#: Ops that relabel or re-scale their input rather than computing from it. A
+#: tensor reached from an initializer through only these is still a weight,
+#: however many hops away it is.
+_PASSTHROUGH = ("DequantizeLinear", "QuantizeLinear", "Cast", "Transpose", "Identity")
+
 
 @dataclass
 class Budget:
@@ -254,6 +259,45 @@ def macs(model: Any) -> int:
     return total
 
 
+def _weight_rooted(model: Any, *, max_hops: int = 4) -> set[str]:
+    """Tensor names that are weights wearing an activation's clothes.
+
+    In a QDQ graph a Conv's weight arrives as the output of a
+    DequantizeLinear, so it is a node output rather than an initializer. ORT
+    emits those nodes at the top of the topological order — every one of them,
+    before the first Conv — and a liveness pass that treats node outputs as
+    activations therefore holds the entire weight set live from node 0 until
+    each weight's consumer runs.
+
+    Measured on `artifacts/onnx/q800_real.onnx` (Citrinet-256, T=800): 411
+    weight-DequantizeLinear nodes occupy positions 0-411 of 1,922, their median
+    distance to their consumer is 934 nodes, and at the reported peak 405 of
+    them are live and contribute 9,816,452 B of 11,250,052 B — 87 %. The same
+    bytes are already counted by `weight_bytes()`, and `placement()` adds the
+    two together, so they are charged twice.
+
+    Follows producers up to `max_hops` through `_PASSTHROUGH` only: no
+    producer means the root is an initializer (a weight), anything else means
+    a real computation produced it (an activation).
+    """
+    producers = {out: node for node in model.graph.node for out in node.output if out}
+    initializers = {init.name for init in model.graph.initializer}
+
+    rooted: set[str] = set()
+    for name in producers:
+        cursor = name
+        for _ in range(max_hops):
+            node = producers.get(cursor)
+            if node is None:
+                if cursor in initializers:
+                    rooted.add(name)
+                break
+            if node.op_type not in _PASSTHROUGH or not node.input or not node.input[0]:
+                break
+            cursor = node.input[0]
+    return rooted
+
+
 def peak_activation(model: Any, *, fused_qdq: bool = False) -> tuple[int, int]:
     """`(peak_bytes, unresolved_tensor_count)` by liveness over the node order.
 
@@ -274,6 +318,9 @@ def peak_activation(model: Any, *, fused_qdq: bool = False) -> tuple[int, int]:
     initializers = {init.name for init in model.graph.initializer}
     graph_inputs = {vi.name for vi in model.graph.input}
     graph_outputs = {vi.name for vi in model.graph.output}
+    # Weights that reach their consumer through Q/DQ are still weights; they
+    # are counted by weight_bytes() and must not be counted again here.
+    weight_rooted = _weight_rooted(model) - graph_outputs
 
     # Element size the accelerator would actually hold each tensor at.
     elem_override: dict[str, int] = {}
@@ -317,7 +364,7 @@ def peak_activation(model: Any, *, fused_qdq: bool = False) -> tuple[int, int]:
 
     for index, node in enumerate(model.graph.node):
         for name in node.output:
-            if not name or name in initializers:
+            if not name or name in initializers or name in weight_rooted:
                 continue
             size = size_of(name)
             if size is None:
