@@ -619,6 +619,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
+    except BrokenPipeError:
+        # `zoo atlas stall | head`: the reader left; that is not an error.
+        import os
+
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
 
 
 if __name__ == "__main__":
