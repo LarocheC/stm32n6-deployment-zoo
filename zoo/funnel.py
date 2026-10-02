@@ -465,7 +465,12 @@ def stage_quantize(
         options=recipe.calibration.options,
     )
     roles = {s.name: s.role for s in graph.inputs}
-    result = qdq.quantize(prepared, out, calibration=spec, roles=roles)
+    qcfg = {**(policy or {}).get("quantize", {}), **recipe.quantize}
+    result = qdq.quantize(
+        prepared, out, calibration=spec, roles=roles,
+        activation_symmetric=bool(qcfg.get("activation_symmetric", False)),
+        weight_symmetric=bool(qcfg.get("weight_symmetric", True)),
+    )
 
     metrics = result.metrics()
     if result.ok and result.path and result.path.is_file():
