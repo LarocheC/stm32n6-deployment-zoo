@@ -7,6 +7,11 @@ killed the ones that didn't.
 
 The failure atlas is the primary product. Latency rows are the secondary one.
 
+**Deploying anything on the N6? Start with [`KNOWLEDGE.md`](KNOWLEDGE.md)**: the
+hub for what every STM32N6 project here has learned, including toolchain pins,
+memory facts, the NPU stalls a clean compile will not show, measured results and
+reusable pieces in other repos. Search the atlas with `uv run zoo atlas <words>`.
+
 ## Quickstart
 
 ```bash
@@ -118,14 +123,17 @@ of a 33 MB Whisper encoder is enough for all 495 of its nodes.
 
 ## The failure atlas
 
-`zoo/faults/known_issues.toml` holds **82 verified constraints**, mined from two
-prior STM32N6 projects and checked entry by entry against their sources. 32 of
-them are *silent*: the tool reports success and the result is wrong.
+`zoo/faults/known_issues.toml` holds **121 verified constraints**, mined from
+three STM32N6 projects (dnsmos_exported, eco8-neaixt and stm32n6-stt) and
+checked entry by entry against their sources. 56 of them are *silent*: the tool
+reports success and the result is wrong.
 
-The 30 entries carrying a verbatim error signature are live code — `classify()`
+The 35 entries carrying a verbatim error signature are live code — `classify()`
 matches them against tool output and returns the workaround, so a recognised
 failure arrives with its remedy rather than just its name. Anything unmatched is
-the discovery queue: `zoo report --new-signatures`.
+the discovery queue: `zoo report --new-signatures`. `zoo atlas` searches the
+prose too, which is what a silent failure needs: it has a symptom, not a log
+line.
 
 The catalogue earns its keep. Within minutes of loading it, one entry —
 *"macs silently zero on QDQ graphs"* — identified a real bug in code written an
@@ -142,6 +150,7 @@ zoo lint       static screen, with a remedy per violation
 zoo screen     the full board-free funnel over every recipe
 zoo measure    quantise, compile, and measure on the board
 zoo report     fold the event log into RESULTS.md
+zoo atlas      search the failure atlas, or classify a log against it
 ```
 
 Built: toolchain discovery and pinning · operator oracle · ONNX probe (local
