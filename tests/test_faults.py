@@ -146,3 +146,21 @@ def test_catalogue_entries_that_claim_a_patch_name_one_that_exists() -> None:
     # already implemented must match the registry exactly.
     implemented = {i.patch for i in signatures.known_issues() if i.patch} & known
     assert implemented <= known
+
+
+def test_atlas_search_finds_a_silent_failure_by_its_symptom() -> None:
+    """A silent failure has no log line to classify; a symptom must still find it."""
+    found = signatures.search_catalogue(["entry point", "align"])
+    assert "signing-without-align-unbootable-image" in [i.id for i in found]
+    assert all(i.silent for i in signatures.search_catalogue(["board"], silent_only=True))
+    assert signatures.search_catalogue(["no-such-word-anywhere"]) == []
+
+
+def test_atlas_cli_classifies_a_log(tmp_path, capsys) -> None:
+    from zoo import cli
+
+    log = tmp_path / "build.log"
+    log.write_text('network.c:57:4: error: #error "Possible mismatch in ll_aton library used"\n')
+    assert cli.main(["atlas", "--classify", str(log)]) == 0
+    assert "ll-aton-middleware-version-mismatch" in capsys.readouterr().out
+    assert cli.main(["atlas", "dcache"]) == 0

@@ -199,6 +199,29 @@ def match_catalogue(text: str) -> KnownIssue | None:
     return None
 
 
+def search_catalogue(
+    terms: list[str], *, silent_only: bool = False, action: str | None = None
+) -> list[KnownIssue]:
+    """Entries whose text contains every term (case-insensitive), in file order.
+
+    For a reader who has a symptom rather than an error message, which is the
+    situation every silent entry describes: there is no log line to classify,
+    only "the board prints nothing" or "the output is constant".
+    """
+    needles = [t.lower() for t in terms if t.strip()]
+    found = []
+    for issue in known_issues():
+        if silent_only and not issue.silent:
+            continue
+        if action and issue.zoo_action != action:
+            continue
+        hay = " ".join((issue.id, issue.title, issue.symptom, issue.cause,
+                        issue.workaround, issue.error_signature, issue.failure_class)).lower()
+        if all(n in hay for n in needles):
+            found.append(issue)
+    return found
+
+
 _SIG_CACHE: dict[str, re.Pattern[str]] = {}
 
 
