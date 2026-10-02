@@ -3,7 +3,7 @@
 Source: `OpenVoiceOS/stt_en_citrinet_256_gamma_0_25_onnx`, a pre-exported ONNX of
 NVIDIA NeMo's `stt_en_citrinet_256_gamma_0_25` (CC-BY-4.0). The bring-up
 happened in [stm32n6-stt](https://github.com/LarocheC/stm32n6-stt) (the local
-checkout is `~/stm32n6-tts`, which is why the atlas sources say so). It went all
+atlas cites it as `stm32n6-stt:path`). It went all
 the way to a push-to-talk captioner on the DK. This note records what the zoo
 should take from it, and points at that repo for everything else.
 
@@ -80,4 +80,4 @@ compiler's estimate. Reading each input from memory-mapped flash first makes it
 The int8 cost at 8 s is 4.91 % → 5.41 % WER on the host (n=373, 95 % CI
 [+0.07, +0.94]). Device and host agree: 5.81 % vs 5.92 % on 64 utterances,
 paired p = 0.897. Live accented speech measures around 30 %. That is a model
-problem, followed up in stt_training, not a port problem.
+problem, followed up in a separate retraining repo, not a port problem.

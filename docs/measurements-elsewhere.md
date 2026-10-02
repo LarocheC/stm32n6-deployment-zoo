@@ -31,7 +31,7 @@ and `LISENNET_NPU_HANDOVER.md` is `docs/targets/stm32n6-lisennet-npu.md`.
   octoFlash.
 - Methods: **validate** = `stedgeai validate --mode target`, "duration ... by
   sample" (usually 10 or 20 samples); **profiler** = `npu_profiler.py`;
-  **fw loop** = the nsnet_dse power firmware's own DWT timing.
+  **fw loop** = the power firmware's own DWT timing.
 - **Nothing in these repos measures speech quality (PESQ/DNSMOS of enhanced
   audio) on the device.** Every PESQ is host-side (ORT, 824-utterance VBD
   test). What the board gives is latency, energy and output fidelity
@@ -114,9 +114,9 @@ validate; all 22 runs passed a gate of fw-loop timing within 3.2% of validate
 | n6net_v2_fullband, rewritten pool (seeded) | noextmem-ec | 95.5 M | 1.314 | 504.7 ± 0.0 | 5.3 | +384 | +64.2 | `:34` |
 | n6net_v2_fullband_native (seeded) | noextmem-ec | 95.4 M | 1.257 | 489.7 ± 0.6 | 5.1 | +390 | +60.9 | `:35` |
 | n6net_v2_fullband before 5588e0f | noextmem-ec | 95.4 M | **hangs** | - | - | - | - | `:36` |
-| anchor NSNet2 monarch_20 (trained, nsnet_dse graph) | noextmem | 0.28 M | 0.789 | 9.8 ± 0.6 | 35 | +12.6 | +4.1 | `:37` |
+| anchor NSNet2 monarch_20 (trained graph from a private repo) | noextmem | 0.28 M | 0.789 | 9.8 ± 0.6 | 35 | +12.6 | +4.1 | `:37` |
 | anchor NSNet2 blockdiag_full | noextmem | 0.73 M | 0.674 | 17.6 ± 0.2 | 24 | +26.5 | +5.5 | `:38` |
-| anchor ConvFSENet (nsnet_dse graph) | noextmem | 0.72 M | 3.108 | 22.1 ± 1.0 | 31 | +7.2 | +4.7 | `:39` |
+| anchor ConvFSENet (graph from a private repo) | noextmem | 0.72 M | 3.108 | 22.1 ± 1.0 | 31 | +7.2 | +4.7 | `:39` |
 | anchor LiSenNet streaming (HF conv-hardened) | noextmem | 1.44 M | 2.788 | 29.7 ± 0.3 | 21 | +11.0 | +2.8 | `:40` |
 
 Per-run detail (min/max/std, cycles, random-input cosine):
@@ -175,7 +175,7 @@ On-device output fidelity (not speech quality):
 ## E. Discrepancies to resolve before quoting
 
 - ConvFSENet: 4.40 ms (profiler, eco8's graph, June) vs 3.108 ms (validate,
-  the nsnet_dse "ConvFSENet" anchor, Sept). The anchor lists 0.72 M MACs vs
+  the "ConvFSENet" anchor from a private repo, Sept). The anchor lists 0.72 M MACs vs
   eco8's 1.47 M MACC/frame, so it is probably a different graph (inference);
   its random-input cos 0.734 is flagged "worth a look" (`N6NET_POWER.md:44-47`).
 - N6NET_POWER.md quotes compiler time estimates b3 1.39 / v2 1.56 ms, while
@@ -205,7 +205,7 @@ eco8-neaixt, N6Net:
 - `deploy/stm32n6/host/npu_cycle_report.py` - static ops/cycles/U_MAC/energy report from `network_c_info.json`, artefact epochs excluded.
 - `deploy/stm32n6/n6net_neuralart.json` - `n6-noextmem` and `n6-noextmem-ec` profiles.
 - `deploy/stm32n6/scripts/measure_n6net.sh` - export -> compile -> load (3 retries, hard gate) -> validate -> npu_profiler sweep into `latency.tsv`.
-- `deploy/stm32n6/power/run_campaign.sh` - validate + 2-pass FNB58 power campaign + summary (drives nsnet_dse's harness, which is not in these repos).
+- `deploy/stm32n6/power/run_campaign.sh` - validate + 2-pass FNB58 power campaign + summary (drives a power harness that is not in these repos).
 - `deploy/stm32n6/power/probes/run_probes.sh` - validate cells one by one, stop at the first hang.
 - `deploy/stm32n6/host/fullband_probes.py` - real-shape probe graphs to isolate a compiler rewrite.
 - `n6net/export_npu.py` - streaming export (`time_split`), ORT parity, int8 post-passes `quantize_prelu_slopes` and `tie_fifo_qparams`; `n6net/model_v2.py::native_full_height`.

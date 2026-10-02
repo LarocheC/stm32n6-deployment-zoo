@@ -136,7 +136,7 @@ permanently distinguishable from one that met the bar.
 
 ## 2. Real calibration, and what it actually changed
 
-`tiny-imagenet` was not on this machine — `~/butterfly/data/tiny-imagenet-200/`
+`tiny-imagenet` was not on this machine — `data/tiny-imagenet-200/` in a local checkout of [butterfly](https://github.com/LarocheC/butterfly)
 contains only the `val_format.py` helper — so it was fetched from
 `zh-plus/tiny-imagenet` and materialised as 512 JPEGs.
 `VoiceBank-DEMAND-16k` was present, but as a Hugging Face parquet snapshot
