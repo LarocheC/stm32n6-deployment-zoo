@@ -1,7 +1,7 @@
 """Toolchain discovery, version pinning, and the shim status check.
 
 `zoo doctor` is built on this. The structure follows
-`~/eco8-neaixt/deploy/stm32n6/scripts/doctor.sh`, which got the important
+`eco8-neaixt:deploy/stm32n6/scripts/doctor.sh`, which got the important
 thing right: it is not enough to check that a tool *exists*, because every
 tool in this chain has a version whose semantics matter.
 

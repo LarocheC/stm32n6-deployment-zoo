@@ -10,31 +10,31 @@
 # ST Edge AI Core. Pinned to one version on purpose: the front end, the
 # operator mapping and the emitted JSON schema all move between releases, and
 # a result is only meaningful next to the build string that produced it.
-root = "/home/claroche/stedgeai/install/4.0"
+root = "~/stedgeai/install/4.0"
 expect_version = "4.0.1-20581"
 
 # The N6 scripts directory that ships n6_loader.py, the stock profile file and
 # the .mpool set. We read from it; we never write to it.
-n6_scripts = "/home/claroche/stedgeai/install/4.0/scripts/N6_scripts"
-ai_runner = "/home/claroche/stedgeai/install/4.0/scripts/ai_runner"
+n6_scripts = "~/stedgeai/install/4.0/scripts/N6_scripts"
+ai_runner = "~/stedgeai/install/4.0/scripts/ai_runner"
 
 # Authoritative operator-mapping documentation (op -> HW / SW_INT / SW_FLOAT).
-operator_support_html = "/home/claroche/stedgeai/install/4.0/Documentation/stneuralart_operator_support.html"
+operator_support_html = "~/stedgeai/install/4.0/Documentation/stneuralart_operator_support.html"
 
 [gcc]
 # Arm GNU toolchain. ST validates 13.3.Rel1 for Cortex-M55; distro 10.x
 # predates usable M55 support. n6_loader.py needs GCC_PATH *exported* because
 # ST's own armgcc Makefile hardcodes a Windows path on line 1.
-path = "/home/claroche/toolchains/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi/bin"
+path = "~/toolchains/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi/bin"
 min_version = "13.0"
 
 [cubeclt]
 # STM32CubeCLT — provides ST-LINK_gdbserver, used by n6_loader.py.
-root = "/home/claroche/opt/st/stm32cubeclt_1.21.0"
+root = "~/opt/st/stm32cubeclt_1.21.0"
 
 [cubeprog]
 # STM32CubeProgrammer 2.21+ (2.21 introduced the mandatory -align on signing).
-root = "/home/claroche/STMicroelectronics/STM32Cube/STM32CubeProgrammer"
+root = "~/STMicroelectronics/STM32Cube/STM32CubeProgrammer"
 external_loader = "ExternalLoader/MX66UW1G45G_STM32N6570-DK.stldr"
 
 [board]

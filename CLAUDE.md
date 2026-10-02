@@ -1,0 +1,86 @@
+# stm32n6-deployment-zoo
+
+Pushes models from Hugging Face through ST Edge AI Core onto an STM32N6570-DK (Cortex-M55 at 800 MHz
+plus the Neural-ART NPU at 1 GHz). It records which models survive, how fast they run, and which
+toolchain limitation killed the rest. The failure atlas (`zoo/faults/known_issues.toml`) is the main
+product and latency rows come second. This repo is also the STM32N6 hub: before you deploy or debug
+anything on the N6, read [KNOWLEDGE.md](KNOWLEDGE.md) and search the atlas with `uv run zoo atlas`.
+
+## Run it
+```bash
+uv sync
+uv run pytest                          # board-free; tests that need ST's tools skip without config/toolchain.toml
+uv run zoo atlas stall depthwise       # search the failure atlas (every word must match); no board, no toolchain
+uv run zoo atlas --silent board        # only failures where the tool reports success
+uv run zoo atlas --classify build.log  # match a build or flash log against the verbatim signatures
+```
+The other commands need ST's tools located first:
+```bash
+cp config/toolchain.example.toml config/toolchain.toml   # machine-local and gitignored; edit the paths
+uv run zoo doctor                      # tools checked and version-pinned, no board (--level board|full with the DK)
+uv run zoo ops Softmax                 # the operator oracle: HW, SW_INT or front-end only
+uv run zoo init <hf-model-id>          # draft a recipe into models/, with TODOs for what it cannot infer
+uv run zoo screen                      # the board-free funnel over every recipe
+uv run zoo measure --only <recipe-id>  # quantise, compile and measure on the board (--no-board stops after compile)
+uv run zoo report                      # fold results/events.jsonl into RESULTS.md
+```
+
+## Where things are
+- `KNOWLEDGE.md`: the N6 hub. It covers toolchain pins, memory facts, operator facts, results measured on
+  this board and in other repos, reusable pieces, and how to add to the hub.
+- `zoo/`: the reusable core (CLI in `zoo/cli.py`, atlas in `zoo/faults/`, graph checks and patches in
+  `zoo/graph/`, quantisation in `zoo/quant/`, ST wrappers in `zoo/st/`, board stage in `zoo/board/`).
+- `models/audio/`, `models/vision/`: one recipe per model attempt. `lab/`: one prose note per model.
+- `results/events.jsonl`: the append-only event log. `RESULTS.md`: the leaderboard generated from it.
+- `config/`: `policy.toml` (evidence bar, memory budget), `profiles/` (compilation profile template and
+  mpools), `toolchain.example.toml`.
+- `docs/`: `defensible-numbers.md`, `first-board-results.md`, `budget-calibration.md`,
+  `measurements-elsewhere.md`.
+
+## Status
+As of 2026-10-02:
+- Built on 2026-08-15 (`999df28` to `7184409`): toolchain harness, operator oracle, lint, memory
+  budget, funnel, int8 quantisation and the board stage. MobileNet was measured at 22.06 ms (`7184409`).
+- 2026-10-02: [#1](https://github.com/LarocheC/stm32n6-deployment-zoo/pull/1) merged (`728946f`). It adds
+  the determinism gate, real calibration and yunet at 320, and measures the Whisper encoder.
+  [#2](https://github.com/LarocheC/stm32n6-deployment-zoo/pull/2) merged (`03476e8`). It adds
+  `KNOWLEDGE.md`, grows the atlas from 82 to 121 entries, adds `zoo atlas`, and applies stm32n6-stt's
+  `zoo-contrib/`.
+- The `citrinet-256-gamma025` recipe stays disabled until its graph rewrites become zoo patches (`bf54bff`).
+- Next, per the README: firmware demos for promoted models. The README's layout lists `firmware/`, and
+  its status points at `.claude/plans/`. Neither is in the repo yet.
+- No open PRs. The branches `gate-and-real-calibration` and `claude/n6-knowledge-hub` were merged by #1
+  and #2.
+
+## Related repos
+- [stm32n6-stt](https://github.com/LarocheC/stm32n6-stt): Citrinet-256 speech-to-text on the same board. Its on-silicon rounds fed the atlas, and its `zoo-contrib/` is the pattern for contributing from another repo.
+- [eco8-neaixt](https://github.com/LarocheC/eco8-neaixt): speech enhancement on the N6 (`deploy/stm32n6/`). It is one of the three projects the atlas was mined from.
+- [dnsmos_exported](https://github.com/LarocheC/dnsmos_exported): DNSMOS as an int8 metric and a trainable loss graph on the N6. It is the third atlas source.
+- [stm32ai-modelzoo-services](https://github.com/LarocheC/stm32ai-modelzoo-services): a fork of ST's own model-zoo training and deployment scripts.
+
+## Conventions
+- Work on a branch and merge into `main` through a PR.
+- Point at other repos with GitHub links or `repo:path`, never local paths. That includes the atlas's
+  `sources`, for example `stm32n6-stt:board/GATE4.md`.
+- This repo is public. Link only public repos, and carry no unpublished numbers. Keep real home
+  directories out of `config/toolchain.example.toml` (use placeholders or `~/opt/...`).
+- Layout: `zoo/` never imports from `lab/`, `models/` or `firmware/`. `lab/` is prose only, with no
+  code. Anything in `lab/` that gets used twice moves into `zoo/` with a test.
+- Never edit `RESULTS.md` by hand. It is generated by `zoo report` from `results/events.jsonl`, which is
+  append-only. A number enters the leaderboard only after it passes the determinism gate in
+  `config/policy.toml` (`docs/defensible-numbers.md`). Label every number with its method.
+- Model artifacts are never committed (`*.onnx`, `*.tflite`, `*.bin`, `*.elf`, weights, generated
+  `network.c`). Only distilled JSON or text under `results/artifacts/` and test fixtures under
+  `tests/fixtures/` go into git.
+- Keep `uv run ruff check .` clean (configured in `pyproject.toml`).
+- Adding to the atlas:
+  - Facts about the part, the toolchain, the board or ST's packages belong here. Facts about one model
+    stay in that model's repo, and `KNOWLEDGE.md` links to them.
+  - Add an `[[issue]]` to `zoo/faults/known_issues.toml` in its section. The sections are, in order:
+    lint rules, graph patches, compile postconditions, board invariants, infra retries, document-only.
+    Within a section, silent entries come first, then the rest alphabetically.
+  - Key each entry on the symptom a reader will see, and cite `sources`.
+  - Give an `error_signature` only when you have the verbatim text, and check it with
+    `zoo atlas --classify`.
+  - From another repo: prepare the files in a `zoo-contrib/` folder there, verify them against a
+    scratch copy of this repo, then apply them here in one PR.

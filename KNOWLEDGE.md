@@ -176,13 +176,12 @@ in each repo; the full list is at the end of `docs/measurements-elsewhere.md`.
 | [stm32n6-stt](https://github.com/LarocheC/stm32n6-stt) | Citrinet-256 ASR end to end: the two NPU stalls and their graph fixes (`model/`, `board/GATE4.md`, a 9-node reproducer in `board/REPRO-blocker2.md`), OTP (`board/OTP.md`), the build/sign/flash recipe (`board/BUILD.md`), the M55 log-mel front end and microphone notes (`firmware/FRONTEND.md`, `firmware/AUDIO-INPUT.md`) |
 | [eco8-neaixt](https://github.com/LarocheC/eco8-neaixt) | speech enhancement on the N6: the LiSenNet deployment, the NPU-hardened variants and `deploy/stm32n6/`; newer N6 work on the `N6Net` branch |
 | [dnsmos_exported](https://github.com/LarocheC/dnsmos_exported) | DNSMOS as an int8 metric and a trainable loss graph on the N6: on-device training, a Neural-ART defect report for ST with a reproducer (`examples/convfsenet_ondevice/`) |
-| [stt_training](https://github.com/LarocheC/stt_training) | retraining Citrinet for the board; `contract.py` pins every number the firmware depends on |
-| [lisenet-npu-ICASSP2027-](https://github.com/LarocheC/lisenet-npu-ICASSP2027-), [dynee_icassp2027_overleaf](https://github.com/LarocheC/dynee_icassp2027_overleaf) | papers that report N6 measurements (LiSenNet on the NPU; int8 early-exit frontiers) |
-| [nsnet_dse](https://github.com/LarocheC/nsnet_dse) | mostly CGRA work; the branch `feat/sparse-nsnet2-n6-power` appears to measure N6 power |
-| [wavenet](https://github.com/LarocheC/wavenet) | a scaffold to export, quantise and compile its `sbse` model for the NPU, with offline preflight checks (`deploy/stm32n6/` on `main`) |
 
-Paths in the atlas's `sources` are local checkouts on the owner's machine.
-`~/stm32n6-tts` is the checkout of stm32n6-stt.
+Other N6 work (model retraining, papers, power measurement, a generative enhancer) lives in private
+repos; their findings reach this hub as atlas entries and measured results.
+
+The atlas cites files as `repo:path` (for example `stm32n6-stt:board/GATE4.md`), where `repo` is one
+of the repositories above and a bare path is this repo.
 
 ## 8. Adding to the hub
 

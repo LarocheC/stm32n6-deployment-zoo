@@ -1,9 +1,9 @@
-# Drafted against the evidence in ~/stm32n6-tts, not by `zoo init`: this graph
+# Drafted against the evidence in stm32n6-stt, not by `zoo init`: this graph
 # was funnelled by hand before the funnel could express it. Every value below
 # is transcribed from a file in that repo and the transcription is cited, so a
 # reviewer can check any line without rerunning anything.
 #
-# (~/stm32n6-tts is the local checkout of github.com/LarocheC/stm32n6-stt.)
+# (https://github.com/LarocheC/stm32n6-stt; files cited as stm32n6-stt:path.)
 #
 # Three things need zoo work before this recipe runs end to end, so the graph
 # is disabled. Without them it reaches the compiler with the rank-3 SE MatMul
@@ -167,7 +167,7 @@ policy          = "first_success"
 # guard from 2**-24 to 1e-2 moves WER from 5.83 % to 30.80 %
 # (eval/results/fe.log).
 provider     = "audio_folder"
-dataset      = "~/stm32n6-tts/corpus/LibriSpeech/dev-clean"
+dataset      = "~/datasets/LibriSpeech/dev-clean"   # the same corpus stm32n6-stt evaluates on
 preprocessor = "log_mel_nemo"
 # 48, not the policy default of 128: this is what produced the shipped
 # artifact (model/q800.py), whose accuracy is measured at 5.41 % WER int8
