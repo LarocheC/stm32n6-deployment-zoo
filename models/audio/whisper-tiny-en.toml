@@ -1,0 +1,102 @@
+# Drafted by `zoo init`, then resolved by hand against lab/whisper-tiny-en.md.
+schema = 1
+id      = "whisper-tiny-en"
+source  = "onnx-community/whisper-tiny.en"
+domain  = "audio"
+task    = "automatic-speech-recognition"
+tier    = 1        # 1=screen  2=measure on board  3=firmware demo
+license = "apache-2.0"
+notes   = "lab/whisper-tiny-en.md"
+
+# The unit of compilation is a graph, not a model. "Whisper doesn't work" is
+# not a result; "the encoder compiles at a frozen 5 s window and the decoder
+# cannot exist here at all" is. Only the encoder is enabled, and each decoder
+# carries the specific reason it is not.
+
+[fetch]
+provider = "hf_onnx"
+revision = "main"   # TODO: pin to a commit sha once it screens clean
+
+[[graph]]
+id   = "encoder-model"
+file = "onnx/encoder_model.onnx"
+# fp32 on disk: 32.9 MB
+# One invocation covers the whole pinned window, so the RTF column answers
+# "does a 5-second chunk take less than 5 seconds to encode".
+realtime_ms = 5000.0
+
+# Pinning the window alone produces a graph that does not load:
+#     Node (/Add_2) Op (Add) [ShapeInferenceError] Incompatible dimensions
+# because embed_positions.weight is a (1500, 384) learned absolute positional
+# embedding being added to a now-(1, 250, 384) activation. Slicing it to
+# (250, 384) is exact — position i of a shorter window is still position i.
+#
+# Lint does not propose this one, and cannot: the graph as downloaded is
+# perfectly consistent. It becomes necessary only because this recipe chose a
+# shorter window, so the request belongs here, beside that choice.
+patches = ["slice_positional_embedding"]
+
+[graph.pin]
+# 80 mel bands, and 500 frames at Whisper's 10 ms hop = a 5-second window.
+# The export is for 3000 frames (30 s), whose fp32 activation peak measured
+# 112.61 MB — beyond even the 32 MB of PSRAM. See lab/whisper-tiny-en.md for
+# the window/footprint table.
+"batch_size" = 1
+"feature_size" = 80
+"encoder_sequence_length" = 500
+
+  [[graph.input]]
+  name  = "input_features"
+  role  = "feature"
+  shape = [1, 80, 500]
+  dtype = "float32"
+  calib = "audio_folder"
+
+  [[graph.output]]
+  name = "last_hidden_state"
+  # shape [1, 250, 384] at this window
+
+[[graph]]
+id   = "decoder-model-merged"
+file = "onnx/decoder_model_merged.onnx"
+enabled     = false
+skip_reason = "one top-level If node: the entire network lives inside its two branches, selecting the with-past and without-past paths. A statically scheduled epoch graph cannot branch, and this is fatal before the growing KV cache is even reached."
+
+[[graph]]
+id   = "decoder-model"
+file = "onnx/decoder_model.onnx"
+enabled     = false
+skip_reason = "avoids the If, but not the growing KV cache: sequence length increases every token, so no static shape describes the graph. Not attempted."
+
+[[graph]]
+id   = "decoder-with-past-model"
+file = "onnx/decoder_with_past_model.onnx"
+enabled     = false
+skip_reason = "same growing KV cache as decoder-model, entered one token later. Not attempted."
+
+[variants]
+profile         = ["onchip", "extflash", "allmems"]
+precision       = ["int8"]
+backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
+policy          = "first_success"
+
+[calibration]
+# Real speech, put through Whisper's own front end. Both halves matter: the
+# encoder's input is a log-mel spectrogram in roughly [-1, 1], so calibrating
+# it on Gaussian noise would set every activation range from a distribution
+# the model will never see, and calibrating it on raw waveform would be worse
+# still — the tensor would not even be the right kind of object.
+#
+# VoiceBank-DEMAND's clean split is single-speaker read speech at 16 kHz, which
+# is what Whisper expects. Its clips are mostly shorter than 5 s, so they are
+# zero-padded to the window; that is exactly what Whisper does to a short
+# utterance before its own front end, so the padded frames are representative
+# rather than invented.
+provider     = "audio_folder"
+dataset      = "~/datasets/voicebank-demand-16k/clean"
+preprocessor = "log_mel_whisper"
+n            = 128
+seed         = 0
+
+  [calibration.options]
+  pad_short = true

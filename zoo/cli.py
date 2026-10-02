@@ -329,28 +329,73 @@ def cmd_measure(args: argparse.Namespace) -> int:
     ctx = fmod.Context(toolchain=tc, table=omod.load(tc), policy=load_policy(),
                        log=EventLog(), zoo_commit=commit)
 
-    recipes = recmod.discover(ROOT / "models")
+    all_recipes = recmod.discover(ROOT / "models")
+    recipes = all_recipes
     if args.only:
         recipes = [r for r in recipes if r.id in set(args.only)]
     if not recipes:
         print("  no matching recipe", file=sys.stderr)
         return 2
 
+    # Policy overrides, so a quick sanity pass does not have to pretend to be
+    # evidence. Whatever is used lands in the event, so a row measured with
+    # --loads 1 is permanently distinguishable from one that met the bar.
+    if args.loads is not None:
+        ctx.policy.setdefault("measure", {})["min_loads"] = args.loads
+    if args.invokes is not None:
+        ctx.policy.setdefault("measure", {})["invokes_per_load"] = args.invokes
+
+    canary = None
+    if not args.no_canary and not args.no_board:
+        canary = fmod.build_canary(ctx, all_recipes)
+        wanted = ctx.policy.get("measure", {}).get("canary_model")
+        if canary is None and wanted:
+            print(f"  ! no canary available ({wanted}); rows will record no bench reference")
+        elif canary is not None:
+            print(f"  canary: {wanted} — read once before each row")
+
     failed = 0
-    print(f"\nmeasuring {len(recipes)} recipe(s) — run {ctx.run_id}\n")
+    cfg = ctx.policy.get("measure", {})
+    print(f"\nmeasuring {len(recipes)} recipe(s) — run {ctx.run_id} — "
+          f"{cfg.get('min_loads', 3)} load(s) x {cfg.get('invokes_per_load', 10)} invoke(s)\n")
+
+    wanted_graphs = set(args.graph or [])
     for rec in recipes:
-        for graph in rec.enabled_graphs:
-            events = fmod.measure_graph(rec, graph, ctx)
+        graphs = [g for g in rec.enabled_graphs if not wanted_graphs or g.id in wanted_graphs]
+        for graph in graphs:
+            def _progress(reading, _rec=rec, _g=graph) -> None:
+                if reading.ok:
+                    spread = (
+                        f" ({reading.min_ms}/{reading.max_ms}/{reading.std_ms})"
+                        if reading.std_ms is not None else ""
+                    )
+                    print(f"        load {reading.index}: {reading.latency_ms} ms{spread}")
+                else:
+                    print(f"        load {reading.index}: failed — {reading.error[:100]}")
+
+            # The canary's own row needs no canary: reading it would measure
+            # the same graph twice and compare it against itself.
+            row_canary = None if rec.id == cfg.get("canary_model") else canary
+            events = fmod.measure_graph(
+                rec, graph, ctx, canary=row_canary, board=not args.no_board,
+                on_reading=_progress,
+            )
             last = events[-1] if events else None
             ok = last is not None and last.status == Status.PASS
             print(f"  {'✓' if ok else '✗'} {rec.id}/{graph.id:<22} reached {last.stage if last else '—'}")
             for ev in events:
-                if ev.status == Status.PASS and ev.metrics.get("latency_ms"):
-                    m = ev.metrics
-                    print(f"        {m['latency_ms']} ms · cos {m.get('ontarget_cos')} · "
-                          f"{m.get('profile_used')}"
+                m = ev.metrics
+                if ev.status == Status.PASS and m.get("latency_ms_median"):
+                    gate = m.get("determinism_gate", "?")
+                    mark = "✓" if gate == "trusted" else "!"
+                    cv = m.get("latency_ms_cv")
+                    print(f"        {mark} {m['latency_ms_median']} ms median · "
+                          f"cos {m.get('ontarget_cos')} · {m.get('profile_used')} · "
+                          f"{m.get('loads_ok')}x{m.get('invokes_per_load')} loads"
+                          + (f" · cv {cv * 100:.2f}%" if cv is not None else "")
                           + (f" · predicted {m['predicted_ms']:.4f} ms "
                              f"(x{m['predicted_vs_measured']:.1f})" if m.get("predicted_ms") else ""))
+                    print(f"          gate: {gate} — {m.get('determinism_reason', '')}")
                 elif ev.status != Status.PASS and ev.error:
                     tag = "INFRA " if ev.is_infra else ""
                     print(f"        [{ev.stage}] {tag}{ev.failure_class} {ev.error[:120]}")
@@ -452,6 +497,29 @@ def build_parser() -> argparse.ArgumentParser:
         "measure", help="quantise, compile and measure on the board (needs hardware)"
     )
     p_measure.add_argument("--only", nargs="*", help="restrict to these recipe ids")
+    p_measure.add_argument(
+        "--graph", nargs="*",
+        help="restrict to these graph ids. A recipe with several graphs otherwise "
+             "costs a full pass to re-measure one of them, which on a bench that "
+             "wedges every few loads is most of a session",
+    )
+    p_measure.add_argument(
+        "--loads", type=int,
+        help="full reloads per row (default: policy min_loads). Below the policy "
+             "figure the row is recorded as 'insufficient', never as trusted",
+    )
+    p_measure.add_argument(
+        "--invokes", type=int,
+        help="invokes per load (default: policy invokes_per_load)",
+    )
+    p_measure.add_argument(
+        "--no-canary", action="store_true",
+        help="skip the bench canary — faster, and the rows say so",
+    )
+    p_measure.add_argument(
+        "--no-board", action="store_true",
+        help="stop after the compile; quantise and generate need no hardware",
+    )
     p_measure.set_defaults(func=cmd_measure)
 
     p_report = sub.add_parser("report", help="fold the event log into RESULTS.md")

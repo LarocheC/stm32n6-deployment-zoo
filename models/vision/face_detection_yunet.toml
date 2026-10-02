@@ -28,7 +28,7 @@ realtime_ms = 33.3   # one camera frame at 30 fps
   role  = "feature"
   shape = [1, 3, 640, 640]
   dtype = "float32"
-  calib = "synthetic"   # TODO: real images before any tier-2 promotion
+  calib = "image_folder"
 
   [[graph.output]]
   name = "cls_8"
@@ -78,6 +78,66 @@ realtime_ms = 33.3   # one camera frame at 30 fps
   name = "kps_32"
   # shape [1, 400, 10]
 
+[[graph]]
+# The same file, re-resolved at 320x320. At 640 this model spills its
+# activations to PSRAM and measured 161.61 ms on this board; ST publish 6.74 ms
+# for the same architecture at 320. The zoo's own screen flagged
+# `activations-in-psram` before anything was compiled, so this row is the test
+# of whether that advice is actionable — and of whether "re-export at 320"
+# needs an export at all. It does not: every Reshape here is `[1, -1, k]` and
+# both Resizes are scale-driven, so setting the input dimension and re-running
+# shape inference produces the 320 graph exactly.
+id   = "face-detection-yunet-2023mar-320"
+file = "face_detection_yunet_2023mar.onnx"
+realtime_ms = 33.3   # one camera frame at 30 fps
+
+  [graph.resolution]
+  input = [1, 3, 320, 320]
+
+  [[graph.input]]
+  name  = "input"
+  role  = "feature"
+  shape = [1, 3, 320, 320]
+  dtype = "float32"
+  calib = "image_folder"
+
+  [[graph.output]]
+  name = "cls_8"
+  # shape [1, 1600, 1] at this resolution
+
+  [[graph.output]]
+  name = "cls_16"
+
+  [[graph.output]]
+  name = "cls_32"
+
+  [[graph.output]]
+  name = "obj_8"
+
+  [[graph.output]]
+  name = "obj_16"
+
+  [[graph.output]]
+  name = "obj_32"
+
+  [[graph.output]]
+  name = "bbox_8"
+
+  [[graph.output]]
+  name = "bbox_16"
+
+  [[graph.output]]
+  name = "bbox_32"
+
+  [[graph.output]]
+  name = "kps_8"
+
+  [[graph.output]]
+  name = "kps_16"
+
+  [[graph.output]]
+  name = "kps_32"
+
 [variants]
 profile         = ["onchip", "extflash", "allmems"]
 precision       = ["int8"]
@@ -85,6 +145,15 @@ backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
 policy          = "first_success"
 
 [calibration]
-provider = "synthetic"   # TODO: a real provider is required for tier 2
+# OpenCV's FaceDetectorYN::detect calls `blobFromImage(pad_image)` with default
+# arguments — scalefactor 1.0, no mean subtraction, and OpenCV's native BGR
+# order. So this network is fed raw 0-255 BGR pixels, and calibrating it on
+# [0, 1] would set every activation scale 255x too small.
+provider = "image_folder"
+dataset  = "~/datasets/tiny-imagenet-200/valid"
 n        = 128
 seed     = 0
+
+  [calibration.options]
+  scale = 255.0
+  bgr   = true

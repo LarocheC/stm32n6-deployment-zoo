@@ -40,6 +40,11 @@ backend         = ["npu", "m55"]   # m55 gives the NPU-vs-CPU speedup
 policy          = "first_success"
 
 [calibration]
-provider = "synthetic"   # TODO: a real provider is required for tier 2
+# Deliberately left synthetic, unlike every other vision recipe. This graph is
+# the bench canary: its job is to produce the same number every session so that
+# a change in it means the bench moved. Repointing its calibration at a corpus
+# that can be re-materialised would make the reference drift for reasons that
+# have nothing to do with the board.
+provider = "synthetic"
 n        = 128
 seed     = 0

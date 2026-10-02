@@ -103,8 +103,23 @@ class GraphSpec:
     realtime_ms: float | None = None
     #: Symbolic dim name -> fixed value. Becomes --fix-parametric-shapes.
     pin: dict[str, int] = field(default_factory=dict)
+    #: Input name -> a different *static* shape to re-resolve the graph at.
+    #: Distinct from `pin`, which fills in dimensions the exporter left
+    #: symbolic; this replaces dimensions the exporter fixed. Two graph entries
+    #: pointing at the same file with different `resolution` are two rows on
+    #: the leaderboard, which is the point: input size is a deployment
+    #: decision, and on this part it is usually the decisive one.
+    resolution: dict[str, list[int]] = field(default_factory=dict)
     inputs: list[IOSpec] = field(default_factory=list)
     outputs: list[IOSpec] = field(default_factory=list)
+    #: Patches to attempt in addition to whatever lint suggests. Lint proposes a
+    #: patch when it can name the violation the patch fixes; a rewrite that is
+    #: needed as a *consequence* of a recipe decision — pinning a window shorter
+    #: than the positional embedding the model was exported with — has no
+    #: violation to attach to, because the graph as downloaded was fine. Those
+    #: are declared here, next to the decision that made them necessary. Each
+    #: still passes through the same parity gate.
+    patches: list[str] = field(default_factory=list)
     enabled: bool = True
     skip_reason: str | None = None
 
@@ -183,6 +198,11 @@ class Calibration:
     preprocessor: str | None = None
     n: int = 128
     seed: int = 0
+    #: Provider knobs — the input convention a corpus has to be put through to
+    #: match what this model was exported for (`scale`, `mean`, `std`, `bgr`).
+    #: Kept per recipe rather than per provider because it is a fact about the
+    #: model, and getting it wrong sets every activation scale wrong.
+    options: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_synthetic(self) -> bool:
@@ -265,6 +285,10 @@ def load(path: Path) -> Recipe:
                 file=gdoc["file"],
                 realtime_ms=gdoc.get("realtime_ms"),
                 pin={k: int(v) for k, v in gdoc.get("pin", {}).items()},
+                resolution={
+                    k: [int(d) for d in v] for k, v in gdoc.get("resolution", {}).items()
+                },
+                patches=list(gdoc.get("patches", [])),
                 inputs=[_io_from_toml(d) for d in gdoc.get("input", [])],
                 outputs=[_io_from_toml(d) for d in gdoc.get("output", [])],
                 enabled=gdoc.get("enabled", True),
@@ -302,6 +326,7 @@ def load(path: Path) -> Recipe:
             preprocessor=cdoc.get("preprocessor"),
             n=int(cdoc.get("n", 128)),
             seed=int(cdoc.get("seed", 0)),
+            options=dict(cdoc.get("options", {})),
         ),
         schema=int(doc.get("schema", SCHEMA_VERSION)),
     )

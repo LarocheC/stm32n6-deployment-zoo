@@ -153,12 +153,22 @@ def stage_probe(path: Path) -> StageOutcome:
 
 
 def stage_shape(model: Any, graph: GraphSpec) -> StageOutcome:
-    """Pin symbolic dimensions and fold recipe-declared constant inputs."""
+    """Pin symbolic dimensions, re-resolve the input, fold constant inputs."""
     started = time.monotonic()
     notes: list[str] = []
     changed = 0
+    failed: list[str] = []
 
     out = model
+    if graph.resolution:
+        # Before pinning: re-resolving clears every derived shape, so anything
+        # pinned first would be discarded by the re-inference anyway.
+        out, result = structural.retarget_input_resolution(out, graph.resolution)
+        notes.append(result.note)
+        changed += result.changed
+        if not result.applied:
+            failed.append(f"resolution {graph.resolution}: {result.note}")
+
     if graph.pin:
         out, result = structural.pin_dims(out, graph.pin)
         notes.append(result.note)
@@ -172,14 +182,20 @@ def stage_shape(model: Any, graph: GraphSpec) -> StageOutcome:
         notes.append(result.note)
         changed += result.changed
 
+    # A requested re-resolution that did not happen must fail the stage. It is
+    # the difference between measuring yunet at 320 and measuring yunet at 640
+    # under a row labelled 320.
     return StageOutcome(
-        Stage.SHAPE, Status.PASS,
+        Stage.SHAPE,
+        Status.FAIL if failed else Status.PASS,
         metrics={
             "pinned": graph.pin,
+            "resolution": graph.resolution,
             "folded_constants": sorted(constants),
             "changed": changed,
         },
-        error="; ".join(n for n in notes if n),
+        failure_class=FC.SHAPE_DYNAMIC_UNPINNABLE if failed else "",
+        error=("; ".join(failed) if failed else "; ".join(n for n in notes if n)),
         duration_s=time.monotonic() - started,
         payload=out,
     )
@@ -376,6 +392,8 @@ def screen_graph(
 
     shaped = stage_shape(model, graph)
     events.append(_emit(ctx, recipe, graph, shaped))
+    if shaped.status != Status.PASS:
+        return events
     model = shaped.payload
 
     # Which patches to try: whatever a first lint pass over the shaped graph
@@ -386,7 +404,12 @@ def screen_graph(
     shaped_path = scratch / "shaped.onnx"
     onnx.save(model, str(shaped_path))
     pre = stage_lint(probe.probe_file(shaped_path), ctx, graph, unlocked=unlocked)
-    wanted = list(pre.metrics.get("suggested_patches", []))
+    # Recipe-declared patches run first: they exist because of a decision the
+    # recipe made (a shorter window, a different resolution), so the graph lint
+    # sees afterwards is the one that will actually be compiled.
+    wanted = graph.patches + [
+        p for p in pre.metrics.get("suggested_patches", []) if p not in graph.patches
+    ]
 
     patched = stage_patch(model, wanted)
     patched.metrics["pre_patch_violations"] = pre.metrics.get("violations", [])
@@ -419,7 +442,14 @@ def screen(recipe: Recipe, ctx: Context, *, unlocked: bool = False) -> list[Even
 # ---------------------------------------------------------------------------
 
 
-def stage_quantize(prepared: Path, out: Path, recipe: Recipe, graph: GraphSpec) -> StageOutcome:
+def stage_quantize(
+    prepared: Path,
+    out: Path,
+    recipe: Recipe,
+    graph: GraphSpec,
+    *,
+    policy: dict | None = None,
+) -> StageOutcome:
     import time as _time
 
     from zoo.quant import qdq
@@ -431,13 +461,33 @@ def stage_quantize(prepared: Path, out: Path, recipe: Recipe, graph: GraphSpec) 
         n=recipe.calibration.n,
         seed=recipe.calibration.seed,
         source=recipe.calibration.dataset,
+        preprocessor=recipe.calibration.preprocessor,
+        options=recipe.calibration.options,
     )
     roles = {s.name: s.role for s in graph.inputs}
     result = qdq.quantize(prepared, out, calibration=spec, roles=roles)
+
+    metrics = result.metrics()
+    if result.ok and result.path and result.path.is_file():
+        # Re-run the memory accounting on the int8 graph. This is the number
+        # that decides placement — the fp32 budget taken at screen time is a
+        # projection, and "int8 will be about four times smaller" is an
+        # expectation that has to be replaced by a measurement of the actual
+        # artifact before it can be quoted.
+        try:
+            after = budgetmod.analyse(result.path)
+            metrics["int8_peak_activation_fused"] = after.peak_activation_fused
+            metrics["int8_quantised_weight_bytes"] = after.quantised_weight_bytes
+            metrics["int8_unresolved_tensors"] = after.unresolved_tensors
+            if policy is not None:
+                metrics["int8_placement"] = after.placement(policy)
+        except Exception as exc:  # noqa: BLE001 - accounting must not fail a good artifact
+            metrics["int8_budget_error"] = f"{type(exc).__name__}: {exc}"
+
     return StageOutcome(
         Stage.QUANTIZE,
         Status.PASS if result.ok else Status.FAIL,
-        metrics=result.metrics(),
+        metrics=metrics,
         failure_class="" if result.ok else FC.QUANT_FAILED,
         error=result.error or "; ".join(result.audit_failures),
         artifacts=[str(out)] if result.path else [],
@@ -466,13 +516,36 @@ def stage_generate(tc: Toolchain, model: Path, base: Path, graph: GraphSpec) -> 
     )
 
 
-def stage_board(tc: Toolchain, compiled, model: Path, graph: GraphSpec) -> StageOutcome:
-    """Load the network and measure it, refusing to measure the wrong thing."""
+def stage_board(
+    tc: Toolchain,
+    compiled,
+    model: Path,
+    graph: GraphSpec,
+    *,
+    policy: dict | None = None,
+    canary: Any = None,
+    val_input: list[Path] | None = None,
+    on_reading=None,  # noqa: ANN001
+) -> StageOutcome:
+    """Reload and re-measure until the policy's evidence bar is met.
+
+    The canary is read *before* the bracket rather than after, so a bench that
+    was already wrong is caught before spending three loads on a model. A row
+    whose canary has drifted is still measured — the numbers are recorded, and
+    quarantined — because a quarantined measurement is evidence about the bench
+    and throwing it away would lose that.
+    """
     import time as _time
 
-    from zoo.board import link, measure
+    from zoo.board import bracket as bmod
+    from zoo.board import link
 
     started = _time.monotonic()
+    cfg = (policy or {}).get("measure", {})
+    loads = int(cfg.get("min_loads", 3))
+    invokes = int(cfg.get("invokes_per_load", 10))
+    unstable_cv = float(cfg.get("unstable_cv", 0.02))
+
     try:
         link.preflight(tc)
     except Exception as exc:  # noqa: BLE001
@@ -481,40 +554,130 @@ def stage_board(tc: Toolchain, compiled, model: Path, graph: GraphSpec) -> Stage
             error=f"{type(exc).__name__}: {exc}", duration_s=_time.monotonic() - started,
         )
 
-    loaded = measure.load_network(tc, compiled.out_dir / "network.c", log_dir=compiled.out_dir)
-    if not loaded.ok:
-        # No success marker means the previous firmware is still resident.
-        # Measuring now would time the wrong model and look entirely fine.
-        return StageOutcome(
-            Stage.BOARD, Status.FAIL, failure_class=FC.LOADER_NO_SUCCESS_MARKER,
-            error=loaded.error, duration_s=_time.monotonic() - started,
-        )
+    reading = canary.read() if canary is not None else None
 
-    result = measure.validate(
-        tc, model, profile=compiled.profile, out_dir=compiled.out_dir / "val",
+    result = bmod.run(
+        tc,
+        network_c=compiled.out_dir / "network.c",
+        model=model,
+        profile=compiled.profile,
+        out_dir=compiled.out_dir / "bracket",
         fix_shapes=graph.fix_parametric_shapes(),
+        loads=loads,
+        invokes=invokes,
+        unstable_cv=unstable_cv,
+        loader_retries=int((policy or {}).get("board", {}).get("loader_retries", 3)),
+        val_input=val_input,
+        on_reading=on_reading,
     )
+    if canary is not None and reading is not None:
+        canary.apply(result, reading)
+
     metrics = result.metrics()
-    metrics["latency_ms_median"] = result.latency_ms
     metrics["profile_used"] = compiled.profile
-    if compiled.info and result.latency_ms:
+    # What the on-target cosine was measured against. Without this the column
+    # is not comparable between rows: `validate`'s default is uniform noise in
+    # [0, 1], which flatters a model calibrated on noise and punishes one
+    # calibrated on real pixels.
+    metrics["ontarget_input_source"] = (
+        "calibration-corpus" if val_input else "random-uniform-0-1"
+    )
+    median = result.median_ms
+    if compiled.info and median:
         predicted = compiled.info.predicted_ms()
         if predicted:
             metrics["predicted_ms"] = predicted
-            metrics["predicted_vs_measured"] = result.latency_ms / predicted
+            metrics["predicted_vs_measured"] = median / predicted
+
+    # A bracket that produced no measurement at all failed; one that produced
+    # measurements the gate distrusts did not. The distinction is the whole
+    # point of recording the gate rather than silently dropping the row.
+    if not result.good:
+        first = next((ld for ld in result.loads if ld.error), None)
+        return StageOutcome(
+            Stage.BOARD, Status.FAIL,
+            metrics=metrics,
+            failure_class=(
+                FC.LOADER_NO_SUCCESS_MARKER
+                if first and first.infra
+                else FC.TARGET_HANG
+            ),
+            error=(first.error if first else "no load produced a measurement"),
+            duration_s=_time.monotonic() - started,
+            payload=result,
+        )
+
     return StageOutcome(
-        Stage.BOARD,
-        Status.PASS if result.ok else Status.FAIL,
+        Stage.BOARD, Status.PASS,
         metrics=metrics,
-        failure_class="" if result.ok else FC.TARGET_HANG,
-        error="" if result.ok else result.error,
+        error="" if result.trusted else f"[{result.gate}] {result.reason}",
         duration_s=_time.monotonic() - started,
         payload=result,
     )
 
 
-def measure_graph(recipe: Recipe, graph: GraphSpec, ctx: Context) -> list[Event]:
-    """Quantise, compile and measure a graph that has already screened clean."""
+def write_val_inputs(
+    recipe: Recipe, model: Path, out_dir: Path, *, samples: int = 8
+) -> list[Path] | None:
+    """Real inputs for `validate -vi`, drawn from the recipe's own corpus.
+
+    Returns None for a synthetically calibrated recipe: there is no real data
+    to offer, and fabricating some here would only relocate the problem.
+
+    The seed is offset from the calibration seed for the same reason the host
+    fidelity check offsets it — a model should not be graded on the samples
+    that set its scales.
+    """
+    if recipe.calibration.is_synthetic:
+        return None
+
+    import numpy as np
+
+    from zoo.quant.calib import CalibrationSpec, get_provider, specs_from_model
+
+    spec = CalibrationSpec(
+        provider=recipe.calibration.provider,
+        n=samples,
+        seed=recipe.calibration.seed + 1,
+        source=recipe.calibration.dataset,
+        preprocessor=recipe.calibration.preprocessor,
+        options=recipe.calibration.options,
+    )
+    specs = specs_from_model(onnx.load(str(model)))
+    try:
+        feeds = list(get_provider(spec.provider).batches(specs, spec))
+    except Exception:  # noqa: BLE001 - falling back to random data is not fatal
+        return None
+    if not feeds:
+        return None
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    # One file per input, in the graph's own input order, which is the order
+    # `-vi` expects them in.
+    for item in specs:
+        stacked = np.concatenate([f[item.name] for f in feeds], axis=0)
+        path = out_dir / f"valinput_{len(written)}.npy"
+        np.save(path, stacked)
+        written.append(path)
+    return written
+
+
+def measure_graph(
+    recipe: Recipe,
+    graph: GraphSpec,
+    ctx: Context,
+    *,
+    canary: Any = None,
+    board: bool = True,
+    on_reading=None,  # noqa: ANN001
+) -> list[Event]:
+    """Quantise, compile and measure a graph that has already screened clean.
+
+    `board=False` stops after the compile. Everything up to and including
+    `network.c` is board-free, so a wedged probe should cost the compile
+    evidence too only if someone asks it to.
+    """
     events: list[Event] = []
     scratch = workdir_for(recipe, graph)
     prepared = scratch / "prepared.onnx"
@@ -523,8 +686,19 @@ def measure_graph(recipe: Recipe, graph: GraphSpec, ctx: Context) -> list[Event]
         if not prepared.is_file():
             return events
 
+    # `prepared.onnx` is written before lint renders its verdict, so its mere
+    # existence proves the graph was *repaired*, not that it was accepted. A
+    # cached file from a previous rejected screen would otherwise walk straight
+    # past the rejection into the quantiser — which is how silero-vad, whose
+    # entire network sits inside two `If` branches, reached the quantize stage
+    # after lint had already refused it.
+    screened = stage_lint(probe.probe_file(prepared), ctx, graph)
+    if screened.status != Status.PASS:
+        events.append(_emit(ctx, recipe, graph, screened))
+        return events
+
     quantised = scratch / "int8.onnx"
-    q = stage_quantize(prepared, quantised, recipe, graph)
+    q = stage_quantize(prepared, quantised, recipe, graph, policy=ctx.policy)
     events.append(_emit(ctx, recipe, graph, q))
     if q.status != Status.PASS:
         return events
@@ -532,9 +706,68 @@ def measure_graph(recipe: Recipe, graph: GraphSpec, ctx: Context) -> list[Event]
     g = stage_generate(ctx.toolchain, quantised, scratch / "compile", graph)
     variant = ids.variant_id(profile=g.metrics.get("profile_used", "?"))
     events.append(_emit(ctx, recipe, graph, g, variant=variant))
-    if g.status != Status.PASS:
+    if g.status != Status.PASS or not board:
         return events
 
-    b = stage_board(ctx.toolchain, g.payload, quantised, graph)
+    b = stage_board(
+        ctx.toolchain, g.payload, quantised, graph,
+        policy=ctx.policy, canary=canary, on_reading=on_reading,
+        val_input=write_val_inputs(recipe, quantised, scratch / "valinput"),
+    )
     events.append(_emit(ctx, recipe, graph, b, variant=variant))
     return events
+
+
+def build_canary(ctx: Context, recipes: list[Recipe]) -> Any:
+    """The session's canary, compiled if it is not already lying around.
+
+    Returns None when the policy names no canary, or when the named recipe is
+    not in the zoo — a missing canary weakens the evidence and is reported as
+    such, but it must not stop a measurement session outright.
+    """
+    from zoo.board import bracket as bmod
+
+    cfg = ctx.policy.get("measure", {})
+    wanted = cfg.get("canary_model")
+    if not wanted:
+        return None
+
+    match = next((r for r in recipes if r.id == wanted), None)
+    if match is None or not match.enabled_graphs:
+        return None
+    graph = match.enabled_graphs[0]
+
+    scratch = workdir_for(match, graph)
+    quantised = scratch / "int8.onnx"
+    compiled = scratch / "compile"
+
+    network_c = None
+    profile = ""
+    for candidate in sorted(compiled.glob("*/network.c")):
+        network_c = candidate
+        profile = candidate.parent.name
+        break
+
+    if network_c is None or not quantised.is_file():
+        # Build it. The canary is only useful if it is the same artifact every
+        # time, so this happens once and is then reused from disk.
+        events = measure_graph(match, graph, ctx, board=False)
+        if not events or events[-1].status != Status.PASS:
+            return None
+        for candidate in sorted(compiled.glob("*/network.c")):
+            network_c = candidate
+            profile = candidate.parent.name
+            break
+        if network_c is None:
+            return None
+
+    return bmod.Canary(
+        ctx.toolchain,
+        network_c=network_c,
+        model=quantised,
+        profile=profile,
+        out_dir=scratch / "canary",
+        fix_shapes=graph.fix_parametric_shapes(),
+        drift_limit=float(cfg.get("canary_drift_frac", 0.10)),
+        invokes=int(cfg.get("invokes_per_load", 10)),
+    )
