@@ -6,7 +6,10 @@
 # Twenty-four more came from ~/stm32n6-tts (the Citrinet-256 bring-up, GitHub
 # LarocheC/stm32n6-stt): seven from its Gate 3 contribution, seventeen from
 # Gate 4 onward (the two NPU stalls, OTP, the audio app's traps), along with
-# corrections to five of the original entries. Edit by hand freely — this is the zoo's institutional memory, not a
+# corrections to five of the original entries. A second pass over
+# ~/eco8-neaixt (the N6Net, ensemble-study and block-design branches, newer
+# than the first survey) and ~/dnsmos_exported added fifteen more and amended
+# ten, for 121 below. Edit by hand freely — this is the zoo's institutional memory, not a
 # build artifact — but keep every entry's `sources`, because a remedy nobody
 # has actually run is a hypothesis.
 #
@@ -17,6 +20,47 @@
 # Ordered: lint rules first (a static screen can predict these), then graph
 # patches, compile post-conditions, board invariants, infra retries, and
 # finally the ones there is nothing to do about but know.
+
+[[issue]]
+id            = "conv-dilation-lowered-off-npu"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: a Conv with dilation > 1 never becomes a native NPU conv - along
+    frequency it is an M55 software Conv, along time a Pad/SpaceToDepth hybrid
+    chain
+    """
+symptom       = """
+    The graph compiles cleanly and runs correctly, so nothing flags it. Time
+    axis: ConvFSENet's streaming graph with native dilation (the `Y1`
+    experiment, replacing the FIFO Gather) went from 70 epochs (30 HW / 27
+    hybrid / 13 SW) to 103 (48 HW / 51 hybrid / 4 SW) - it removed the 9 SW
+    Gathers but added ~33 hybrid epochs - and measured 5.42 ms on board
+    (validate, cos 0.9997) against ~5.4 ms for the gather form: a wash or a
+    slight regression. Frequency axis: N6Net's frequency-dilated convs (d = 2,
+    4, 8; same kernel and MACs, ~30x the reach on paper) compile to a SW `Conv`
+    on the Cortex-M55 and were dropped at compile time.
+    """
+cause         = """
+    In this flow (stedgeai 4.0.1) the compiler realizes time dilation as Pad +
+    SpaceToDepth + DepthToSpace (hybrid epochs) and frequency dilation as a
+    software conv. Both mechanisms are read off the generate reports by the
+    sources; no ST documentation is cited for them.
+    """
+workaround    = """
+    Keep dilation out of the deploy graph. For causal dilation along time in a
+    streaming graph, make each tap its own past-column input and let the host
+    ring buffer pick the slots: N6Net-v2 turns its dilated k_f x 3 temporal
+    conv into three k_f x 1 convs over {t-2d, t-d, t}, summed - 0 SW / 0 hybrid
+    epochs. For frequency reach, reduce the frequency axis to one row and
+    broadcast-add it back (all HW) instead of dilated or upsampling convs. Lint
+    predicate: any Conv whose `dilations` attribute has an element > 1.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/n6net/model_v2.py"]
 
 [[issue]]
 id            = "dynamic-matmul-software-epoch-fallback"
@@ -48,6 +92,56 @@ silent        = true
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/README.md"]
+
+[[issue]]
+id            = "fifo-state-concat-slice-off-npu"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: a streaming FIFO kept inside the graph as Concat + Slice runs on the
+    M55 (Concat) or as hybrid epochs (Slice), and that plumbing - not the MACs -
+    sets the frame time
+    """
+symptom       = """
+    The streaming graph compiles, runs and matches the host. N6Net v1 as drawn
+    (FIFO on the W axis, 1x6 temporal conv) compiled to 26 epochs, 20 HW + 6
+    hybrid: each block's W-axis Concat (FIFO + current column) ran on the M55
+    as a `PROCESSOR` memcpy of 148 kB, and the W-axis Slice (FIFO shift) was a
+    hybrid epoch. Folding time into channels still left 3 hybrid Concats (21
+    epochs). Compiler estimate: 3.55 ms/frame for the drawn layout against 1.44
+    ms with no Concat/Slice (estimates, not board numbers). ConvFSENet's ~4.4
+    ms floor is attributed to the same per-block hybrid Slice/Concat state
+    plumbing, and LiSenNet's FIFO streaming graphs run at 0.34-0.56 GMAC/s
+    against 2.2-3.1 GMAC/s for its stateless windows, which have no state ops.
+    """
+cause         = """
+    Every state-movement op is hybrid or software in this flow, never pure-HW
+    DMA: Concat runs on the M55 on both the W and the channel axis, a W-axis
+    Slice is hybrid, and only a channel-axis Slice maps to HW. The cost is per
+    block and per launch, independent of width, so sizing by MACs mispredicts
+    it. Kernels along W (time) are also the worst-mapped convs in the
+    compiler's cost model: 48 MAC per compute cycle against 108-129 for k x 1
+    along H (single-conv probes, compiler figures).
+    """
+workaround    = """
+    Keep the FIFO out of the graph: each past column is its own graph input and
+    the graph returns only the new column, so the host owns the ring buffer
+    (N6Net `--layout time_split`). N6Net v1 then compiled to 42 HW / 0 hybrid
+    epochs, one blob with `--enable-epoch-controller`, and measured 1.611
+    ms/frame on board (2.447 ms without the epoch controller). Cost: about 370
+    kB of int8 host copies per frame with compiler-allocated inputs; pointer
+    rotation needs `--no-inputs-allocation` (not yet done). The other exit, at
+    t = 1, is a recurrent cell written as 1x1 convs with an explicit hidden
+    state: LiSenNet's GRU-over-time cell cut hybrid epochs 51 -> 24 and 77 -> 25
+    and measured 1.822 vs 2.787 ms and 2.181 vs 4.823 ms against the matched
+    conv+FIFO graphs (re-initialised weights). Lint predicate: a Concat or
+    Slice on a path between a graph input and a graph output that carry state.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/n6net/export_npu.py", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md"]
 
 [[issue]]
 id            = "fp32-elementwise-tail-sets-activation-peak"
@@ -244,6 +338,40 @@ detectable_statically = true
 sources       = ["/home/claroche/eco8-neaixt/convfsenet/quant.py"]
 
 [[issue]]
+id            = "reducemean-single-spatial-axis-hybrid-transpose"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: ReduceMean over the H axis alone compiles to a hybrid Transpose
+    epoch; the same mean over (H, W) is a HW GlobalAveragePool
+    """
+symptom       = """
+    A mean over frequency (H) of a (1, C, H, 1) tensor compiles and is
+    numerically right, but goes through a hybrid Transpose epoch that breaks an
+    otherwise all-HW epoch-controller blob: N6Net-v2 at 64 rows with four
+    `gap` branches compiled to 43 stages in 5 EC blobs plus 4 hybrid Transpose
+    epochs before the fix, and to one blob after it.
+    """
+cause         = """
+    Neural-ART maps a spatial mean to HW only as GlobalAveragePool over both
+    spatial axes; a ReduceMean over H alone is rearranged through a Transpose
+    first (from the compile probes; mechanism not documented by ST here).
+    """
+workaround    = """
+    When the reduced tensor has W == 1 (one streaming frame), reduce over (H, W)
+    instead - same numbers, HW GlobalAveragePool (`FullBand.forward` in
+    n6net/model_v2.py). The broadcast Add that puts the height-1 result back on
+    the trunk is HW and ran correctly on the board (`gap` probe: 0.109 ms, cos
+    1.000000). Lint predicate: ReduceMean whose axes cover exactly one of the
+    two spatial axes.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md"]
+
+[[issue]]
 id            = "software-epoch-op-tier"
 failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
 stage         = "lint"
@@ -256,10 +384,17 @@ symptom       = """
     A graph using ReduceSum, Greater, GreaterOrEqual, Less, LessOrEqual, Log,
     Gather, Tile or Resize compiles cleanly and produces correct results, but
     each such op is mapped to a Cortex-M55 software epoch (or forces a float
-    fallback), costing an NPU pipeline teardown, a memory round-trip and cache
-    maintenance. Nothing flags it: STM32N6_ALLOWED_OPS accepts these because
-    they ARE in ST's mapping table, just slowly - so a regression that
+    fallback), costing an NPU pipeline teardown, a memory round-trip and
+    cache maintenance. Nothing flags it: STM32N6_ALLOWED_OPS accepts these
+    because they ARE in ST's mapping table, just slowly - so a regression that
     reintroduces an un-substituted form is invisible at compile time.
+    Observed in the N6Net probes (stedgeai 4.0.1, n6-noextmem-ec): Tile runs
+    as one SW epoch (12 kB on the M55) and splits an all-HW graph into two
+    epoch-controller blobs; Resize 1 -> 128 followed by Add is folded back
+    into a HW broadcast Add; Resize, ConvTranspose and an H-only pixel
+    shuffle used to upsample along frequency go partly hybrid (DepthToSpace,
+    Concat, Pad, Transpose), and an AveragePool pyramid gives hybrid Pad
+    epochs.
     """
 cause         = """
     ST maps this op tier to software rather than to the Neural-ART accelerator.
@@ -269,16 +404,18 @@ workaround    = """
     Hand-substitute with HW-mapped equivalents - documented: ReduceSum ->
     ReduceMean*N, tensor-Div -> Reciprocal*Mul, Greater -> Equal - and lint
     against the stricter DNSMOS_DEVICE_OPS (= STM32N6_ALLOWED_OPS minus
-    {ConvTranspose, Div, Greater, GreaterOrEqual, Less, LessOrEqual, ReduceSum,
-    Resize, Gather, Tile}) rather than the permissive set, so the substitution
-    cannot regress unnoticed. Report software_epoch_ops() as a separate warning
-    tier for graphs that legitimately keep them.
+    {ConvTranspose, Div, Greater, GreaterOrEqual, Less, LessOrEqual,
+    ReduceSum, Resize, Gather, Tile}) rather than the permissive set, so the
+    substitution cannot regress unnoticed. Report software_epoch_ops() as a
+    separate warning tier for graphs that legitimately keep them. To put a
+    height-1 tensor back onto a full-height one, use a broadcast Add (HW,
+    and board-verified to run) instead of Tile or Resize.
     """
 patch         = "substitute_software_epoch_ops"
 silent        = true
 is_infra      = false
 detectable_statically = true
-sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/host/fullband_probes.py"]
 
 [[issue]]
 id            = "spectral-norm-power-iteration-traced-into-graph"
@@ -350,6 +487,49 @@ detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/export.py", "/home/claroche/eco8-neaixt/convfsenet/quant.py"]
 
 [[issue]]
+id            = "stride3-conv-software-epoch"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: LiSenNet's k=(2,5), stride-(1,3) down-sampling convs run as
+    Cortex-M55 software epochs in every variant
+    """
+symptom       = """
+    Compiles and runs correctly; the cost sits in the SW column. In LiSenNet's
+    windowed graph the 6 SW epochs cost 38.1 ms of 73.6 ms per window (52%):
+    23.2 ms for the three encoder down-sampling convs (k=(2,5), stride (1,3)
+    over frequency) and 14.9 ms for the Gather layout ops (npu_profiler). In
+    the streaming graphs the same three convs stay SW in every variant (always
+    6 SW epochs: 3 Conv + 3 Gather); in the nc20-shaped streaming graph they
+    cost 0.063 / 0.048 / 0.045 ms. Grouping them in an ensemble fold multiplied
+    that to 0.465 / 0.250 / 0.194 ms at K=2.
+    """
+cause         = """
+    The source's words: "a geometry the conv engine won't map". Which attribute
+    triggers it - stride 3, the 5-wide kernel under that stride, or the 2-row
+    kernel - was not isolated. Inference: stride 3 is the likely trigger, since
+    stride 2 and 4 along H map to HW in N6Net and a stride-(1,3)
+    ConvTranspose in the same LiSenNet decoder is expanded into HW convs.
+    """
+workaround    = """
+    Budget a stride-3 Conv as a SW epoch; if the NPU share matters, re-shape
+    the down-sampling (stride 2/4, or a strided k x 1 along H, both HW in
+    N6Net) and re-read the generate report. Note that the ensemble lab log's
+    rule "grouped convs with 2-D kernels fall to SW" rests on these same three
+    convs, which were already SW ungrouped (base_fixed.txt: epochs 10/19/29 are
+    SW Conv); its probe only shows grouped 1x1 and depthwise 1x3 convs as pure
+    HW. Those grouped stride-3 convs (group = K) ran as SW and did not stall,
+    although the lint predicate of stride2-depthwise-conv-stalls-npu (group >
+    1 and stride > 1) would flag them - that stall concerns HW-mapped
+    depthwise convs. Lint predicate: Conv with any stride equal to 3.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/lisennet/model.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/reports/base_fixed.txt", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/prof_base_fixed.log", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/prof_ens_k2_fold.log", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/reports/probe.txt"]
+
+[[issue]]
 id            = "validate-random-feeds-on-stateful-graph"
 failure_class = "MISLEADING_VALIDATION_METRIC"
 stage         = "validate"
@@ -413,6 +593,45 @@ silent        = false
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py"]
+
+[[issue]]
+id            = "gru-op-and-batch-fold-reshape-not-importable"
+failure_class = "UNSUPPORTED_OP_FORM"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    An exported nn.GRU (ONNX GRU plus the reshape that folds an axis into batch)
+    does not compile; the same recurrence written as a t=1 cell of 1x1 convs
+    maps to HW
+    """
+error_signature = "Order of dimensions of input cannot be interpreted"
+symptom       = """
+    LiSenNet's dual-path-RNN bottleneck does not compile: the (b,t,f,d) ->
+    (b*t,f,d) reshape that feeds the GRU fails with "Order of dimensions of
+    input cannot be interpreted". The paper adds that the frequency-axis
+    bidirectional GRU is unimportable in both its fused and unrolled forms (a
+    32-step recurrence explodes to ~850 slices). Even where an ONNX GRU
+    compiles it would run as Cortex-M55 software.
+    """
+cause         = """
+    Neural-ART cannot map the ONNX GRU op, and the front end rejects the
+    rank-changing reshape nn.GRU needs to treat a feature axis as batch.
+    """
+workaround    = """
+    Replace a bidirectional GRU over frequency (fully available every frame)
+    with convs. For a GRU over time, export the streaming step at t = 1 as the
+    gate equations with 1x1 convs over (b, d, 1, f) and the hidden state as an
+    explicit (b, H, 1, f) state tensor (`TimeGRU`, which agrees with nn.GRU to
+    1.2e-7). That graph has 0 GRU ops, its Sigmoid/Tanh/Mul/Sub map to HW (SW
+    epochs stay at the model's usual 6), and it measured 1.822 ms (nc24) and
+    2.181 ms (relu6-deep) per frame against 2.787 / 4.823 ms for the matched
+    conv+FIFO graphs (re-initialised weights). Lint predicate: any GRU, LSTM or
+    RNN node, or a Reshape that folds a non-batch axis into batch.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/paper/main.tex", "/home/claroche/eco8-neaixt/paper/data/board_results.csv", "/home/claroche/eco8-neaixt/README.md"]
 
 [[issue]]
 id            = "non-static-io-shape"
@@ -646,6 +865,40 @@ detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py"]
 
 [[issue]]
+id            = "two-axis-layernorm-not-npu-mappable"
+failure_class = "UNSUPPORTED_OP_FORM"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    A LayerNorm over two axes with a 2-D affine is not NPU-mappable; Neural-ART's
+    LayerNorm takes only a 1-D per-channel affine
+    """
+symptom       = """
+    LiSenNet's 2-axis CustomLayerNorm (33 ReduceMean in the graph) is blocker
+    #1 of four: it lowers to ReduceMean/Sqrt/Div instead of the normalization
+    primitive. Together with blockers #2-#4 the conv variant segfaulted atonn
+    (signo=11) at codegen; the segfault itself was traced to #3 and #4, so
+    whether the LayerNorm alone fails the compile or only falls back to
+    software is not isolated (one source calls it "not NPU-mappable", another a
+    "hard stedgeai blocker").
+    """
+cause         = """
+    Neural-ART's LayerNorm primitive takes only a 1-D per-channel affine; a
+    normalization whose scale/bias span two axes has no HW form.
+    """
+workaround    = """
+    Use a per-channel normalization that folds into the preceding conv
+    (lisennet `norm="batchnorm"`); the hardened LiSenNet with 0
+    LayerNormalization nodes compiles and deploys. Lint predicate: a
+    LayerNormalization, or a ReduceMean/Sub/Pow/ReduceMean/Sqrt/Div chain,
+    whose scale or bias has rank > 1.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/paper/main.tex"]
+
+[[issue]]
 id            = "bool-rooted-mask-chain-unquantizable"
 failure_class = "QUANTIZATION_STRUCTURALLY_UNREACHABLE"
 stage         = "quantize"
@@ -682,6 +935,44 @@ silent        = true
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "prelu-float-slope-software-epoch"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "quantize"
+zoo_action    = "graph-patch"
+title         = """
+    SILENT: ORT leaves PRelu slopes as float initializers, and Neural-ART then
+    runs every PReLU as a pure-software epoch
+    """
+symptom       = """
+    The int8 graph compiles and is correct, but each PReLU is a SW epoch on the
+    M55: all 6 in N6Net v1, whose first compile split into 24 epochs (12 HW / 6
+    hybrid / 6 SW). LiSenNet's handover lists PReLU/Mish ("per-channel float
+    slope") as blocker #2: "blocks full int8 / forces M55 hybrid".
+    """
+cause         = """
+    ORT's static quantizer does not quantize the PRelu slope input, and
+    Neural-ART maps PRelu to HW only when the slope is quantized. Equal-valued
+    slopes (e.g. the 0.25 init) are also deduplicated by the exporter into one
+    initializer plus Identity aliases.
+    """
+workaround    = """
+    After quantize_static, fold the Identity aliases and give every PRelu an
+    int8 symmetric per-tensor slope behind a DequantizeLinear
+    (`quantize_prelu_slopes` in n6net/export_npu.py) - 0 SW epochs. The
+    compiler still expands PReLU into HW relu/mul/add epochs: in N6Net v1 the
+    elementwise-only stages were 40% of the cycles for 0.5% of the ops, and
+    PReLU -> ReLU (which fuses into the conv) took the estimate from 1.44 to
+    1.12 ms/frame and 42 to 30 stages. Prefer ReLU where the model allows
+    (lisennet `act="relu"`). Lint predicate: a PRelu whose slope is a float
+    initializer rather than a DequantizeLinear output, and any Mish.
+    """
+patch         = "quantize_prelu_slopes"
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/n6net/export_npu.py", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/paper/main.tex"]
 
 [[issue]]
 id            = "qdq-split-consumers-break-equality-mask"
@@ -724,6 +1015,45 @@ silent        = true
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/export.py"]
+
+[[issue]]
+id            = "state-io-qparams-not-tied"
+failure_class = "STATE_IO_QPARAM_MISMATCH"
+stage         = "quantize"
+zoo_action    = "graph-patch"
+title         = """
+    SILENT: calibrating streaming-state inputs apart from the outputs that feed
+    them gives them different int8 scales, and the state path becomes
+    requantization
+    """
+symptom       = """
+    Quantization succeeds and nothing warns. In N6Net, separate calibration
+    gave each FIFO path (state input, both Concat inputs, Concat output,
+    shifted state output) four slightly different scale/zero-points, which
+    turns the Concat into a requantizing (software) op and the state I/O into a
+    scale conversion. The recipe decides it: ConvFSENet's quantizer had already
+    matched every state_k_in scale to its state_k_out (zp -128, identical to 7+
+    digits).
+    """
+cause         = """
+    quantize_static calibrates each graph input and output independently;
+    nothing ties a state input to the output whose value it receives on the
+    next call.
+    """
+workaround    = """
+    After quantization, copy the qparams of each state output (the block-input
+    column it stores) onto the matching state input's Q/DQ and onto every Q/DQ
+    on the FIFO path (`tie_fifo_qparams` in n6net/export_npu.py). N6Net's
+    compiled state inputs and outputs then share scale/zp (0.0452/0, 0.0470/0,
+    0.0498/-1), no requantization happens between calls so the host threads
+    raw int8, and the int8 mask still matched fp32 at cosine 0.9999. Check:
+    every (state_in, state_out) pair has equal scale and zero-point.
+    """
+patch         = "tie_state_io_qparams"
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/n6net/export_npu.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md"]
 
 [[issue]]
 id            = "atonn-segfault-empty-pad-constant-value"
@@ -846,23 +1176,26 @@ symptom       = """
     `n6-allmems-O3`.
     """
 cause         = """
-    Asserted to be absent from the STM32N6 target's supported operator set.
-    CAVEAT: the source records no compile attempt, no error message and no
-    report for this claim - and the same repo's lint wrongly rejected
-    InstanceNormalization, which the compiler accepted. Treat the causal half as
-    the author's assumption; the memory consequence is well measured.
+    Mis-asserted: ConvTranspose IS in the device vocabulary. LiSenNet's
+    hardened decoder (upsample="convtranspose", 4-D) compiles and runs on the
+    board, and the compiler expands its ConvTransposes into HW convs. What
+    does not map: a grouped ConvTranspose crashes atonn's expansion pass, and
+    upsampling along frequency via ConvTranspose went partly hybrid in N6Net.
+    The stride-2 Conv input-gradient ConvTransposes of the PESQ backward were
+    never compiled, so whether they would map is untested; the memory
+    consequence of the zero-insertion replacement is well measured.
     """
 workaround    = """
-    Express transposed convolution as zero-insertion upsampling followed by an
-    ordinary Conv, and budget for the extra intermediate (or move to an allmems
-    profile). Before rewriting, attempt the compile - a lint rejection is not a
-    verdict.
+    Try the compile with ConvTranspose first and read the generate report;
+    fall back to zero-insertion upsampling followed by an ordinary Conv only
+    if the ConvTranspose is grouped, fails, or lands in SW/hybrid epochs, and
+    then budget for the extra intermediate (or move to an allmems profile).
     """
 patch         = "zero_insertion_upsample_conv"
 silent        = false
 is_infra      = false
 detectable_statically = true
-sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md"]
 
 [[issue]]
 id            = "dynamo-exporter-shape-subgraph-artifacts"
@@ -977,6 +1310,44 @@ silent        = false
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
+
+[[issue]]
+id            = "grouped-convtranspose-crashes-atonn-expansion"
+failure_class = "UNSUPPORTED_OP_FORM"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    A grouped ConvTranspose crashes atonn's expansion pass; slicing it per group
+    instead pushes the expanded convs to M55 float software
+    """
+symptom       = """
+    Folding K ensemble members into grouped convs, the grouped ConvTranspose
+    "crashes atonn's expansion pass with garbage dequant scales". The fallback,
+    a per-member Slice -> ConvTranspose -> Concat, compiles, but every expanded
+    transposed conv becomes a SW `Conv(float)` epoch wrapped in SW
+    DequantizeLinear/QuantizeLinear epochs (K=2 fold: SW epochs 6 -> 24, the
+    expanded convs 0.42-0.53 ms each, about 2.79 ms at K=2 and 4.19 ms at K=3),
+    while the same expanded ConvTransposes map to HW in the unfolded graph.
+    """
+cause         = """
+    atonn 4.0.1 does not handle a grouped ConvTranspose in its expansion pass
+    (not diagnosed beyond the garbage-scale observation); the Slice/Concat
+    wrapper then breaks the HW mapping of the expanded convs.
+    """
+workaround    = """
+    Write grouped (per-member) ConvTranspose, and every grouped conv that is
+    not 1x1 or depthwise, as block-diagonal dense: no `group` attribute, zero
+    off-diagonal blocks (they quantize exactly), standard shapes, so the HW
+    mapping survives. In the fold this brought SW epochs back to the baseline's
+    6 and K=2 from 7.387 to 3.762 ms/frame. Keep grouped convs only for 1x1
+    pointwise and depthwise, which the group probe shows as pure HW. Lint
+    predicate: ConvTranspose with group > 1.
+    """
+patch         = "block_diagonal_dense_grouped_convtranspose"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/reports/ens_k2_fold.txt", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/prof_ens_k2_fold.log", "/home/claroche/eco8-neaixt/ENSEMBLE_STUDY_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/build_group_probe.py"]
 
 [[issue]]
 id            = "pad-scalar-constant-value"
@@ -1581,6 +1952,61 @@ detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/budget.py"]
 
 [[issue]]
+id            = "full-height-kernel-split-into-subconvs-hangs-npu"
+failure_class = "DEVICE_HANG_IN_REWRITTEN_KERNEL"
+stage         = "runtime"
+zoo_action    = "compile-postcondition"
+title         = """
+    A full-height k x 1 conv (8x1 over 8 rows) is rewritten by the compiler into
+    masked 1x1 sub-convs; the blob compiles clean, then hangs the NPU on target
+    """
+symptom       = """
+    generate succeeds - one epoch-controller blob, 0 SW / 0 hybrid epochs - and
+    the firmware loads, then inference never returns: `validate` times out
+    after 50 s (read timeout). After about three such hangs the board wedges
+    (DEV_USB_COMM_ERR, or AP1 not answering) and needs a physical replug. Hit
+    by N6Net-v2's full-band `pool` branch (`v2_fullband`, `_nopos`, `_lsig`);
+    a five-layer reduction reproduced it with and without the epoch
+    controller, seeded weights, stedgeai 4.0.1, n6-noextmem-ec.
+    """
+cause         = """
+    The compiler rewrites the 8x1 valid conv over 8 rows into eight masked 1x1
+    sub-convs, one per input row, summed by a 7-Add tree (`Conv2D_*_subm_0..7`
+    in network_c_info.json), and that emitted kernel hangs. Board probes split
+    it: the split kernel alone (`fullh_only`) hangs, while the trunk alone (0.100
+    ms), GAP + broadcast Add (`gap`, 0.109 ms) and native strided convs +
+    broadcast Add (`pool_native`, 0.193 ms) run at cos >= 0.999999. The 4x1
+    stride-4 convs, the 4x1 stride-2 stem and 5x1 convs stay single native
+    convs. (fullband_probes.py quotes ST's limit as vertical kernels native up
+    to height 3 only; 4x1 strided and 5x1 stayed native here.) Not checked:
+    whether the hanging builds also carry an ACTIV -> CONVACC port-0 stream
+    link, the stall pattern of activ-to-convacc-stream-link-stalls-npu; the
+    network.c files are not committed.
+    """
+workaround    = """
+    Post-compile gate: flag every `_subm_` node in network_c_info.json and
+    probe it on the board before shipping - the compiler reporting an op as
+    HW-mapped says nothing about whether the kernel it emits executes. Do not
+    reject on the name alone: stm32n6-stt's k=7 depthwise conv split into
+    three `_subm_` parts completed when fed from a streaming engine (see
+    activ-to-convacc-stream-link-stalls-npu). Rewrite a full-height
+    k x 1 valid conv as an (s x 1) stride-s conv emitting one channel block per
+    kernel segment, then a fixed 0/1 (k/s x 1) conv (`native_full_height`,
+    `n6net.export_npu --pool-rewrite native`): exact to 1.2e-7 in fp32, int8
+    mask cosine 1.0000, trained weights carry over, 1.314 ms/frame on board.
+    Or build the branch from native strided convs (`pool_native`, 1.257 ms,
+    needs retraining). Rule for 4.0.1: keep every vertical kernel at a height
+    it compiles whole (<= 5 here, or strided). Probe suspected hangs one cell at
+    a time and stop at the first (`power/probes/run_probes.sh`), so a wedge
+    costs one cell.
+    """
+patch         = "native_full_height"
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/host/fullband_probes.py", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/n6net/export_npu.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/power/probes/run_probes.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/cells.txt"]
+
+[[issue]]
 id            = "int8-grouped-conv-hw-lowering-assert"
 failure_class = "HW_LOWERING_ASSERT"
 stage         = "compile"
@@ -1623,9 +2049,14 @@ title         = """
     """
 symptom       = """
     `n6-noextmem` (weights in npuRAM) cannot compile the graph and the model
-    must fall back to `n6-allmems-O3` with weights in external octoFlash - which
-    for weight-heavy models makes it memory-bandwidth-bound (dense NSNet2: 2.81
-    MB read per frame at 122 MB/s ~= the whole 22.94 ms, RTF 1.43).
+    must fall back to `n6-allmems-O3` with weights in external octoFlash -
+    which for weight-heavy models makes it memory-bandwidth-bound (dense
+    NSNet2: 2.81 MB read per frame at 122 MB/s ~= the whole 22.94 ms, RTF
+    1.43). N6Net-v2 found the weight ceiling at about 1.4 MB in npuRAM3-6
+    (C ~ 128): C128 (1.25 MB of weights) fits with npuRAM3-6 all >= 75% full
+    and two convs dropping from 256 to 160 ops/cycle; C192 (2.83 MB) leaves
+    553 kB unplaced, and on octoFlash its estimate is 17.8 ms at 7.4% MAC
+    utilisation - over the 16 ms hop.
     """
 cause         = """
     The N6 has roughly 1.8 MB npuRAM + 1 MB cpuRAM; the LiSenNet windowed graph
@@ -1633,17 +2064,19 @@ cause         = """
     is 4.15 MB short.
     """
 workaround    = """
-    Check weights+activations against ~2.8 MB before choosing a profile; shrink
-    weights (structured-sparsity re-export took monarch_full 2.85 MB -> 0.86 MB
-    file / 0.72 MB on-chip) or accept `n6-allmems-O3` where the weight traffic
-    is small enough to be free (492 KiB streams at ~13 MB/s at no cost). Weights
-    are countable from the ONNX but the activation total comes from the
-    compiler's allocator, so the decision needs a compile.
+    Check weights+activations against ~2.8 MB, and weights alone against
+    ~1.4 MB, before choosing a profile; expect slower conv scheduling as the
+    pools approach full. Shrink weights (structured-sparsity re-export took
+    monarch_full 2.85 MB -> 0.86 MB file / 0.72 MB on-chip) or accept
+    `n6-allmems-O3` where the weight traffic is small enough to be free (492
+    KiB streams at ~13 MB/s at no cost). Weights are countable from the ONNX
+    but the activation total comes from the compiler's allocator, so the
+    decision needs a compile.
     """
 silent        = false
 is_infra      = false
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md"]
 
 [[issue]]
 id            = "app-slot-512k-overflow-into-weights"
@@ -2132,15 +2565,20 @@ cause         = """
     """
 workaround    = """
     Gate every measurement on the loader printing \"Start operation achieved
-    successfully\" and abort the run otherwise; never let a harness proceed to
-    validate after a failed load. Cross-check the reported MACC/epoch count
-    against the model's own `network_generate_report.txt` before trusting a
-    latency figure.
+    successfully\" and abort the run otherwise; never let a harness proceed
+    to validate after a failed load (measure_streaming.sh / measure_n6net.sh
+    retry the load up to 3 times, then refuse). Cross-check the reported
+    MACC/epoch count against the model's own `network_generate_report.txt`
+    before trusting a latency figure. A stronger check used on 2026-09-17:
+    compare the firmware's own cycle-count timing of the same network (ST's
+    port_dwt API - see npu-cycle-counter-dwt-dead-and-reset-in-aidpuprocess)
+    with validate's duration (all 22 N6Net campaign runs within 3.2%); a
+    stale resident model would fail it.
     """
 silent        = true
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/scripts/measure_n6net.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/scripts/measure_streaming.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_ledger.csv"]
 
 [[issue]]
 id            = "ai-dpu-model-check-rejects-int8-rank3-output"
@@ -2557,18 +2995,23 @@ cause         = """
     always lands inside that window. NOT the jumpers and not the graphs.
     """
 workaround    = """
-    Read the firmware banner on /dev/ttyACM0 BEFORE blaming hardware - the tell
-    was the first banner line `PWR_DONE fid=4674 sat=46737 rt=1875`, printed by
-    power_loop() on completion. Restore the stock `Core/Src/main.c` from
-    `main.c.pwr_orig` (byte-identical to main.c.rt_bak/main.c.loss_bak) and keep
-    the power version as `main.c.pwr_loop_saved`. Restoring main.c forces a
-    relink, which then trips the GCC_PATH/Error-127 gotcha, so export GCC_PATH
-    too. Always bracket a campaign with a control graph whose latency is known.
+    Read the firmware banner on /dev/ttyACM0 BEFORE blaming hardware - the
+    tell was the first banner line `PWR_DONE fid=4674 sat=46737 rt=1875`,
+    printed by power_loop() on completion. Restore the stock
+    `Core/Src/main.c` from `main.c.pwr_orig` (byte-identical to
+    main.c.rt_bak/main.c.loss_bak) and keep the power version as
+    `main.c.pwr_loop_saved`. Restoring main.c forces a relink, which then
+    trips the GCC_PATH/Error-127 gotcha, so export GCC_PATH too. Always
+    bracket a campaign with a control graph whose latency is known. If main.c
+    is stock and the control graph validates, an E801 'Invalid firmware' at
+    bind for one graph can instead be the validation app rejecting its I/O
+    table (35-in/36-out graphs failed so in validate and npu_profiler; see
+    validate-fails-on-some-multi-io-streaming-graphs).
     """
 silent        = false
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md"]
+sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md"]
 
 [[issue]]
 id            = "ram-firmware-lost-on-power-cycle"
@@ -2872,14 +3315,17 @@ cause         = """
     cost scales with node count.
     """
 workaround    = """
-    Reduce batch size, profile only when the per-epoch split is actually needed,
-    and otherwise take total latency from `validate` - remembering the ~1 ms
-    method offset (see validate-vs-profiler-latency-offset).
+    Reduce the batch size: on the bigger ensemble-fold graphs npu_profiler
+    hung at `-b 16` (telemetry volume) while `-b 1` and `-b 4` worked, and on
+    the baseline b=1 equalled b=16 (2.598 vs 2.598 ms), so single-shot
+    numbers are clean. Profile only when the per-epoch split is actually
+    needed, and otherwise take total latency from `validate`, labelled by
+    method (see validate-vs-profiler-latency-offset).
     """
 silent        = false
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/ENSEMBLE_STUDY_HANDOVER.md"]
 
 [[issue]]
 id            = "stale-gdbserver-or-busy-serial-port"
@@ -2920,14 +3366,20 @@ title         = """
     """
 error_signature = "Loading memories failed ! ST-LINK error (DEV_USB_COMM_ERR) could not connect: Connection timed out"
 symptom       = """
-    `n6_loader.py` aborts with `Loading memories failed !`, sometimes repeatedly
-    for the same graph, then loads first try after a USB cycle; or every
-    subsequent load attempt fails with DEV_USB_COMM_ERR. Triggered by killing a
-    runner mid-inference, by the powerdown reset the loader issues, and
-    sometimes simply by a completed validate run. THE LOAD LOG IS MISLEADING -
-    the real cause is only in `n6_loader.log`. It cost a measurement slot
+    `n6_loader.py` aborts with `Loading memories failed !`, sometimes
+    repeatedly for the same graph, then loads first try after a USB cycle; or
+    every subsequent load attempt fails with DEV_USB_COMM_ERR. Triggered by
+    killing a runner mid-inference, by killing `n6_loader` mid-"Loading
+    memories", by the powerdown reset the loader issues, sometimes simply by
+    a completed validate run, by connecting STM32_Programmer_CLI to the
+    board straight after a validate run (which wedged the ST-LINK itself),
+    and by a graph that hangs the NPU (the board wedges after about three
+    hung attempts: DEV_USB_COMM_ERR, or AP1 not answering). One unprovoked AP1
+    wedge was also seen mid-campaign. THE LOAD LOG IS MISLEADING - the real
+    cause is only in `n6_loader.log`. It cost a measurement slot
     (convfsenet_head_fwd was never measured) and it hit both a band graph and
-    the LiSenNet relu6-deep model, so it is entirely independent of the graph.
+    the LiSenNet relu6-deep model, so it is entirely independent of the
+    graph.
     """
 cause         = """
     The ST-LINK connection forwarded from Windows through usbipd drops on the
@@ -2936,17 +3388,24 @@ cause         = """
     """
 workaround    = """
     Check `n6_loader.log`, not just the load log. Kill any stale
-    `ST-LINK_gdbserver` first, then cycle the attachment: `usbipd detach --busid
-    <id>` then `usbipd attach --wsl --busid <id>` (the busid can change across
-    replug). If the wedge follows a `validate` run, PHYSICALLY re-plug the USB -
-    an SWD software reset does NOT clear it. Never kill runners mid-inference.
-    Any failure recorded while the probe is wedged must be DISCARDED, never
-    attributed to the model.
+    `ST-LINK_gdbserver` first, then cycle the attachment: `usbipd detach
+    --busid <id>` then `usbipd attach --wsl --busid <id>` (the busid can change
+    across replug). After a killed load, `usbipd.exe detach` -> `unbind` ->
+    `bind` -> `attach --wsl`, verified with `STM32_Programmer_CLI -c port=SWD
+    mode=UR`, recovered without a power cycle. If the wedge follows a
+    `validate` run, PHYSICALLY re-plug the USB (CN6) - an SWD or software USB
+    reset does NOT clear it - and never probe the board with
+    STM32_Programmer_CLI between validate runs: validate cells back to back.
+    Never kill runners or loads mid-flight. Harness pattern that held across
+    campaigns: pkill ST-LINK_gdbserver, sleep 5 s, up to 3 load attempts,
+    proceed only on "Start operation achieved successfully". Any failure
+    recorded while the probe is wedged must be DISCARDED, never attributed to
+    the model.
     """
 silent        = false
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/EFFICIENCY_REWORK_PLAN.md"]
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/EFFICIENCY_REWORK_PLAN.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/power/probes/run_probes.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/scripts/measure_n6net.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/ENSEMBLE_STUDY_HANDOVER.md"]
 
 [[issue]]
 id            = "usbipd-attach-required-and-busid-changes"
@@ -2994,10 +3453,15 @@ title         = """
     """
 symptom       = """
     No error; the power capture completes and yields clean, quotable mW /
-    uJ-per-inference figures. But the baseline phase is not idle, so the deltas
-    are wrong - the giveaway is that `matched - idle` comes out NEGATIVE (-13.6
-    / -11.2 mW). Numbers derived this way were quoted externally before the flaw
-    was found.
+    uJ-per-inference figures. But the baseline phase is not idle, so the
+    deltas are wrong - the giveaway is that `matched - idle` comes out
+    NEGATIVE (-13.6 / -11.2 mW). Numbers derived this way were quoted
+    externally before the flaw was found. Still true on 2026-09-17: the
+    nsnet_dse analyser prints "neither baseline is truly idle -- the idle
+    phases are a HAL_GetTick busy loop while real inference parks the M55 in
+    WFE", matched wait minus idle is -9.2 to -11.6 mW in all 22 N6Net
+    campaign runs, and N6NET_POWER.md states "the board idles at 565 mW" and
+    computes every uJ/inference and mW-rt figure against that bracketed idle.
     """
 cause         = """
     The 'idle' phase is `pwr_spin()`, a `while (HAL_GetTick()-t0 < ms)` busy
@@ -3007,16 +3471,18 @@ cause         = """
     differ in MCU behaviour as well as in NPU work.
     """
 workaround    = """
-    Quote absolute energy on the UTIA matched-wait basis (it at least holds the
-    loop structure fixed) and describe the 0.9144 W figure as 'loaded baseline,
-    MCU spinning', not 'idle'. A true idle requires a WFI/WFE phase in the
-    firmware. Within-firmware ratios (nb 4 vs nb 8) remain valid because both
-    use identical baselines.
+    Quote absolute energy on the UTIA matched-wait basis (it at least holds
+    the loop structure fixed) and describe the 0.9144 W figure as 'loaded
+    baseline, MCU spinning', not 'idle'. A true idle requires a WFI/WFE phase
+    in the firmware. Within-firmware ratios (nb 4 vs nb 8) remain valid
+    because both use identical baselines. The N6Net campaign exports both
+    bases per cell (campaign_cells.csv `uj_idle_base` / `uj_utia_base`, e.g.
+    b3 with epoch controller 444.9 vs 461.4 uJ) - quote both.
     """
 silent        = true
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_runs.csv", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_cells.csv", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/pass1/n6net_b3__n6-noextmem-ec/analyze.txt"]
 
 [[issue]]
 id            = "calibration-set-size-changes-compiled-latency"
@@ -3099,6 +3565,46 @@ silent        = true
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/stm32n6-tts/firmware/FRONTEND.md", "/home/claroche/stm32n6-tts/docs/GATES-5-6.md", "/home/claroche/stm32n6-tts/board/BUILD.md"]
+
+[[issue]]
+id            = "compiler-power-estimates-underpredict-board"
+failure_class = "ANALYTIC_ESTIMATE_NOT_A_VERDICT"
+stage         = "compile"
+zoo_action    = "document-only"
+title         = """
+    SILENT: the compiler's power_estimates (cycles and energy in
+    network_c_info.json) under-predict the board - energy 3.3-5x low, time
+    13-66% low - and include multi-watt artefact epochs
+    """
+symptom       = """
+    The per-epoch estimates look authoritative. Against the DK on 2026-09-17
+    (N6Net): energy b3 129 uJ estimated vs 445 measured, v2_c96 94 vs 472; time
+    b3 1.39 vs 1.61 ms, v2 (C128) 1.56 vs 2.60 ms. Artefacts: a 257-op input
+    Sub reported 21.6 W over 462k cycles, and each epoch-controller blob
+    carries a 51-82k-cycle controller epoch at a multi-watt level. Placement
+    noise: unchanged 5x1 conv epochs were scheduled at 59-63k cycles instead of
+    46k after a memory-placement shift (same layer, same ops), a noise floor of
+    about +-0.15 ms. A home-made epoch-count regression (R^2 0.972-0.994 on six
+    board-measured graphs) missed an ensemble fold by 2x (3.5-4.3 ms estimated,
+    7.387 ms measured) because SW fallbacks, not epochs, set its cost.
+    """
+cause         = """
+    The static model counts ops and cycles per epoch at the 1 GHz NPU clock and
+    excludes M55 time. The board side is measured at the 5 V input, so
+    regulator losses inflate it (the source's own caveat). An epoch-count fit
+    prices launches, not what runs in each epoch.
+    """
+workaround    = """
+    Use the estimates to rank layouts and to spot mapping problems, never as
+    latency or energy. Drop epochs reporting > 1000 mW (npu_cycle_report.py
+    does), treat differences under ~0.15 ms as noise, and measure on the board
+    (validate or npu_profiler, plus the power harness) before quoting. Rankings
+    and ratios were the reliable part.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/host/npu_cycle_report.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md"]
 
 [[issue]]
 id            = "cpuram2-pool-overlaps-fsbl-region"
@@ -3361,6 +3867,46 @@ detectable_statically = false
 sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/firmware/FRONTEND.md", "/home/claroche/stm32n6-tts/firmware/WORKLIST.md", "/home/claroche/stm32n6-tts/firmware/vendor-mods/gate4.patch"]
 
 [[issue]]
+id            = "npu-idle-throughput-not-free-in-energy"
+failure_class = "ENERGY_TRACKS_MACS_NOT_LATENCY"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    SILENT: filling the NPU's idle throughput is nearly free in time but not in
+    energy - energy per inference tracks MACs, and a faster schedule is not a
+    cheaper one
+    """
+symptom       = """
+    N6Net, designed to fill unused NPU throughput, ran 130x the MACs of
+    blockdiag_full in 1.7x the time (12 ps/MAC vs 910 ps), but energy per MAC
+    fell only 4-7x (24-35 nJ -> 5-7 nJ): 15-95x the anchors' energy per
+    inference, +23-70 mW at a 16 ms hop against their +3-6 mW. The epoch
+    controller made b3 34% faster (2.447 -> 1.611 ms) but saved only 5.5%
+    energy (471 -> 445 uJ) while inference power rose from +192 to +276 mW; at
+    the fixed hop both cost the same (+56.0 vs +56.7 mW). v2_c96, at the
+    highest conv utilisation (233 ops/cycle, compiler figure), drew the most
+    power (+409 mW) for the same energy per MAC.
+    """
+cause         = """
+    An idle NPU draws almost nothing, so unused throughput was never being paid
+    for; filling it adds its full switching energy. Small graphs spend each
+    inference mostly on fixed overhead (epoch launches, memory traffic), which
+    is why their per-MAC cost is 3-7x higher.
+    """
+workaround    = """
+    Budget energy per MAC, not per millisecond: about 5-7 nJ/MAC for large
+    NPU-resident graphs and 21-35 nJ/MAC for small overhead-bound ones on this
+    board and harness (board power at 5 V, busy-loop idle baseline), then
+    measure. Do not justify extra MACs by idle NPU time, and do not expect a
+    latency optimisation (epoch controller, higher utilisation) to save energy
+    at a fixed frame rate.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_cells.csv"]
+
+[[issue]]
 id            = "ort-optimization-level-changes-int8-reference"
 failure_class = "HOST_REFERENCE_NOT_A_FIXED_POINT"
 stage         = "validate"
@@ -3430,6 +3976,38 @@ silent        = true
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+
+[[issue]]
+id            = "realtime-power-exceeds-energy-times-rate"
+failure_class = "DUTY_CYCLE_PEDESTAL_UNPRICED"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    SILENT: per-inference energy x frame rate under-predicts the real-time added
+    power - about 2x for N6Net, up to 6.7x for small graphs
+    """
+symptom       = """
+    The saturated-loop energy per inference looks like the number to multiply
+    by the frame rate, but the duty-cycled real-time phase measures more: b3
+    445 uJ x 62.5 fps = 27.8 mW predicted, 56.7 mW measured. Ratio of
+    real-time to predicted from the published table: monarch_20 6.7x,
+    blockdiag_full 5.0x, ConvFSENet 3.4x, LiSenNet streaming 1.5x; the
+    campaign's duty_over_sat column spans 1.19 (v2 C128) to 6.78 (monarch_20).
+    """
+cause         = """
+    A pedestal from duty-cycling the NPU, which nsnet_dse measured and traced
+    to the board, not the network (per N6NET_POWER.md; that evidence is not in
+    these repos). It weighs more when the network itself costs less.
+    """
+workaround    = """
+    Measure a real-time phase (one inference per hop, idle in between) and
+    quote its added mW as the product figure; report saturated uJ/inference
+    only as a per-inference quantity, never multiplied up to product power.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_cells.csv", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/pass1/n6net_b3__n6-noextmem-ec/analyze.txt"]
 
 [[issue]]
 id            = "serial-fed-states-zero-point-anomaly"
@@ -3642,20 +4220,32 @@ symptom       = """
     checkpoint; the nblocks-20 point uses an UNTRAINED random-weight checkpoint.
     """
 cause         = """
-    Latency and epoch count are weight-independent, so nothing in the toolchain
-    flags the substitution. Checkpoints never published from the training box,
-    and synthetic/untrained rungs added to sweep a structural parameter, sit in
-    the same `cp_*/g_best` layout as trained ones.
+    Latency and epoch count are MOSTLY weight-independent, so nothing in the
+    toolchain flags the substitution. Checkpoints never published from the
+    training box, and synthetic/untrained rungs added to sweep a structural
+    parameter, sit in the same `cp_*/g_best` layout as trained ones. Two
+    exceptions: an all-zero parameter (a zero-initialised positional
+    embedding feeding an Add) is folded away by the toolchain, so an
+    untrained compile can be structurally different from the trained graph;
+    and quantization ranges, which follow the weights, move epoch splits
+    (see calibration-set-size-changes-compiled-latency) and the allocator's
+    spill split - the RF-196 windowed `deep` (re-initialised) and
+    `relu6-deep` (trained) graphs, same topology, measured 5.72 vs 3.09
+    ms/frame while their streaming graphs agree within 1%.
     """
 workaround    = """
     Record checkpoint provenance (and a weight hash / host FP32 metric)
-    alongside every board measurement, and mark rows whose weights are not the
-    trained artifact. Quote latency from such rows ONLY - never accuracy/PESQ.
+    alongside every board measurement, and mark rows whose weights are not
+    the trained artifact. Quote latency from such rows ONLY - never
+    accuracy/PESQ - and only for graphs that stay on-chip. Before a
+    compile-only study, initialise every parameter that could be all-zero
+    with small random values, and re-measure on the trained artifact before
+    publishing.
     """
 silent        = true
 is_infra      = false
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md"]
 
 [[issue]]
 id            = "validate-vs-profiler-latency-offset"
@@ -3663,29 +4253,35 @@ failure_class = "SILENT_CROSS_METHOD_LATENCY_BIAS"
 stage         = "validate"
 zoo_action    = "document-only"
 title         = """
-    INFRA, SILENT: validate and npu_profiler latencies are not interchangeable
-    (~1 ms offset)
+    INFRA, SILENT: label every latency with its method - but the claimed ~1 ms
+    validate-vs-npu_profiler offset is not reproduced on same-graph pairs
     """
 symptom       = """
-    Both tools succeed and report per-inference latency; mixing them in one
-    table silently biases rows measured by `validate` upward by roughly 1 ms
-    relative to `npu_profiler`'s pure-inference figure. This actually happened:
-    a native-dilation experiment was compared at 5.42 ms (validate) against a
-    4.40 ms baseline (profiler).
+    The repo's notes say `validate`'s `duration ... by sample` runs ~1 ms
+    above `npu_profiler`, and a native-dilation result (5.42 ms, validate)
+    was compared with a 4.40 ms profiler baseline on that basis - but those
+    are two different graphs. Where the same graph was measured both ways the
+    methods agree to 0.1 ms or better: LiSenNet streaming 2.79 vs 2.784 ms,
+    the nc20-shaped streaming graph 2.599 vs 2.598 ms; and the power
+    firmware's own cycle-count timing matched validate within 3.2% on all
+    22 N6Net campaign runs.
     """
 cause         = """
-    `validate`'s `duration ... by sample` includes host/protocol overhead that
-    the profiler's pure-inference measurement excludes. A host
-    measurement-method property, not a model property.
+    Unverified. Inference: the profiler prints per-epoch times and a wall
+    total, and its per-epoch sums exclude 0.5-1.0 ms of inter-epoch overhead
+    (ensemble_sweep README); a figure taken from per-epoch sums rather than
+    the total would read low by about the claimed offset.
     """
 workaround    = """
-    Record the measurement METHOD with every latency number and only compare
-    like-for-like.
+    Record the measurement method with every latency number, compare
+    like-for-like, and take the profiler's wall total, never its per-epoch
+    sum, as latency. Do not apply a ~1 ms correction; measure both methods on
+    the same graph if a cross-method comparison is unavoidable.
     """
 silent        = true
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_runs.csv"]
 
 [[issue]]
 id            = "xspi-reads-before-invoke-cost-13-percent"
@@ -3856,6 +4452,36 @@ silent        = false
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+
+[[issue]]
+id            = "fnb58-stops-after-init-read-gap"
+failure_class = "POWER_METER_PROTOCOL_STALL"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA: the FNB58 power meter stops accepting commands if the client leaves a
+    few seconds between its init and its first read
+    """
+symptom       = """
+    The meter stops answering commands and, when the kernel resets it, drops
+    off the bus.
+    """
+cause         = """
+    Meter-side behaviour after init; not diagnosed further in the source.
+    """
+workaround    = """
+    Use a client that reads immediately after init (nsnet_dse's
+    `fnb58_hidraw.py`, which never leaves a gap). The 2026-09-17 campaign
+    drove the meter this way from the Linux side, with the rig of nsnet_dse's
+    power_harness/README-LINUX.md (FNB58 inline on CN8, JP2 = 5V_USB_SNK,
+    debug on CN6), which suggests the Windows-only workaround in
+    fnb58-interrupt-out-fails-over-usbip may be superseded - not verifiable
+    from these repos.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/power/run_campaign.sh"]
 
 [[issue]]
 id            = "gcc-path-hardcoded-windows-error-127"
@@ -4036,6 +4662,52 @@ silent        = false
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "validate-fails-on-some-multi-io-streaming-graphs"
+failure_class = "HOST_TOOL_INCOMPATIBILITY"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    stedgeai validate cannot measure some multi-I/O streaming graphs that
+    compile and that npu_profiler can run
+    """
+error_signature = "INTERNAL ERROR: 'NoneType' object is not subscriptable"
+symptom       = """
+    On ensemble-fold graphs (18 inputs / 18 outputs) `validate --mode target`
+    crashed host-side in the import pass with `INTERNAL ERROR: 'NoneType'
+    object is not subscriptable`. On K-branch graphs (35 in / 36 out) both
+    validate and npu_profiler failed at runtime bind with E801 Invalid firmware
+    - the validation app rejected the I/O table. npu_profiler bound the 18/18
+    folds fine but hung at `-b 16` (telemetry volume); `-b 1` and `-b 4`
+    worked.
+    """
+cause         = """
+    Not diagnosed. The E801 case is put down to the size of the I/O table, with
+    an unknown threshold: the handover's ">~20-IO" is too low, because 26-input
+    LiSenNet streaming graphs validated normally (r6str 4.825 ms, deepstr 4.877
+    ms). The NoneType crash is not an I/O-count effect: the same 18/18 graphs
+    bound in npu_profiler, and 18-input baselines validate.
+    """
+workaround    = """
+    Measure such graphs with npu_profiler at `-b 1` / `-b 4` (the baseline gave
+    2.598 ms at both b=1 and b=16), and size an I/O problem on a K=1 twin
+    first. An E801 at bind with stock firmware and a passing control graph
+    points at the I/O table, not the board; the regex fallback in classify()
+    files any E801 under LOAD_FAILED (infra), so do not let it be discarded as
+    a board fault.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/ENSEMBLE_STUDY_HANDOVER.md", "/home/claroche/eco8-neaixt/paper/data/board_results.csv", "/home/claroche/eco8-neaixt/paper/data/compile_facts.json"]
+
+
+# ###########################################################################
+# AMENDMENTS. Each replaces only the fields listed under [amend.issue];
+# `sources` lists the full new array (old sources first).
+# ###########################################################################
+
 
 [[issue]]
 id            = "validate-refuses-unfused-gemm-graph"
