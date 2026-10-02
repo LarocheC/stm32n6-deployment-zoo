@@ -2,8 +2,14 @@
 #
 # GENERATED from a survey of ~/dnsmos_exported and ~/eco8-neaixt, then verified
 # entry by entry against the cited sources. 112 findings were extracted, all
-# 112 survived verification, and they merge into the 82 distinct constraints
-# below. Edit by hand freely — this is the zoo's institutional memory, not a
+# 112 survived verification, and they merged into 82 distinct constraints.
+# Twenty-four more came from ~/stm32n6-tts (the Citrinet-256 bring-up, GitHub
+# LarocheC/stm32n6-stt): seven from its Gate 3 contribution, seventeen from
+# Gate 4 onward (the two NPU stalls, OTP, the audio app's traps), along with
+# corrections to five of the original entries. A second pass over
+# ~/eco8-neaixt (the N6Net, ensemble-study and block-design branches, newer
+# than the first survey) and ~/dnsmos_exported added fifteen more and amended
+# ten, for 121 below. Edit by hand freely — this is the zoo's institutional memory, not a
 # build artifact — but keep every entry's `sources`, because a remedy nobody
 # has actually run is a hypothesis.
 #
@@ -14,6 +20,47 @@
 # Ordered: lint rules first (a static screen can predict these), then graph
 # patches, compile post-conditions, board invariants, infra retries, and
 # finally the ones there is nothing to do about but know.
+
+[[issue]]
+id            = "conv-dilation-lowered-off-npu"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: a Conv with dilation > 1 never becomes a native NPU conv - along
+    frequency it is an M55 software Conv, along time a Pad/SpaceToDepth hybrid
+    chain
+    """
+symptom       = """
+    The graph compiles cleanly and runs correctly, so nothing flags it. Time
+    axis: ConvFSENet's streaming graph with native dilation (the `Y1`
+    experiment, replacing the FIFO Gather) went from 70 epochs (30 HW / 27
+    hybrid / 13 SW) to 103 (48 HW / 51 hybrid / 4 SW) - it removed the 9 SW
+    Gathers but added ~33 hybrid epochs - and measured 5.42 ms on board
+    (validate, cos 0.9997) against ~5.4 ms for the gather form: a wash or a
+    slight regression. Frequency axis: N6Net's frequency-dilated convs (d = 2,
+    4, 8; same kernel and MACs, ~30x the reach on paper) compile to a SW `Conv`
+    on the Cortex-M55 and were dropped at compile time.
+    """
+cause         = """
+    In this flow (stedgeai 4.0.1) the compiler realizes time dilation as Pad +
+    SpaceToDepth + DepthToSpace (hybrid epochs) and frequency dilation as a
+    software conv. Both mechanisms are read off the generate reports by the
+    sources; no ST documentation is cited for them.
+    """
+workaround    = """
+    Keep dilation out of the deploy graph. For causal dilation along time in a
+    streaming graph, make each tap its own past-column input and let the host
+    ring buffer pick the slots: N6Net-v2 turns its dilated k_f x 3 temporal
+    conv into three k_f x 1 convs over {t-2d, t-d, t}, summed - 0 SW / 0 hybrid
+    epochs. For frequency reach, reduce the frequency axis to one row and
+    broadcast-add it back (all HW) instead of dilated or upsampling convs. Lint
+    predicate: any Conv whose `dilations` attribute has an element > 1.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/n6net/model_v2.py"]
 
 [[issue]]
 id            = "dynamic-matmul-software-epoch-fallback"
@@ -45,6 +92,56 @@ silent        = true
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/README.md"]
+
+[[issue]]
+id            = "fifo-state-concat-slice-off-npu"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: a streaming FIFO kept inside the graph as Concat + Slice runs on the
+    M55 (Concat) or as hybrid epochs (Slice), and that plumbing - not the MACs -
+    sets the frame time
+    """
+symptom       = """
+    The streaming graph compiles, runs and matches the host. N6Net v1 as drawn
+    (FIFO on the W axis, 1x6 temporal conv) compiled to 26 epochs, 20 HW + 6
+    hybrid: each block's W-axis Concat (FIFO + current column) ran on the M55
+    as a `PROCESSOR` memcpy of 148 kB, and the W-axis Slice (FIFO shift) was a
+    hybrid epoch. Folding time into channels still left 3 hybrid Concats (21
+    epochs). Compiler estimate: 3.55 ms/frame for the drawn layout against 1.44
+    ms with no Concat/Slice (estimates, not board numbers). ConvFSENet's ~4.4
+    ms floor is attributed to the same per-block hybrid Slice/Concat state
+    plumbing, and LiSenNet's FIFO streaming graphs run at 0.34-0.56 GMAC/s
+    against 2.2-3.1 GMAC/s for its stateless windows, which have no state ops.
+    """
+cause         = """
+    Every state-movement op is hybrid or software in this flow, never pure-HW
+    DMA: Concat runs on the M55 on both the W and the channel axis, a W-axis
+    Slice is hybrid, and only a channel-axis Slice maps to HW. The cost is per
+    block and per launch, independent of width, so sizing by MACs mispredicts
+    it. Kernels along W (time) are also the worst-mapped convs in the
+    compiler's cost model: 48 MAC per compute cycle against 108-129 for k x 1
+    along H (single-conv probes, compiler figures).
+    """
+workaround    = """
+    Keep the FIFO out of the graph: each past column is its own graph input and
+    the graph returns only the new column, so the host owns the ring buffer
+    (N6Net `--layout time_split`). N6Net v1 then compiled to 42 HW / 0 hybrid
+    epochs, one blob with `--enable-epoch-controller`, and measured 1.611
+    ms/frame on board (2.447 ms without the epoch controller). Cost: about 370
+    kB of int8 host copies per frame with compiler-allocated inputs; pointer
+    rotation needs `--no-inputs-allocation` (not yet done). The other exit, at
+    t = 1, is a recurrent cell written as 1x1 convs with an explicit hidden
+    state: LiSenNet's GRU-over-time cell cut hybrid epochs 51 -> 24 and 77 -> 25
+    and measured 1.822 vs 2.787 ms and 2.181 vs 4.823 ms against the matched
+    conv+FIFO graphs (re-initialised weights). Lint predicate: a Concat or
+    Slice on a path between a graph input and a graph output that carry state.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/n6net/export_npu.py", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md"]
 
 [[issue]]
 id            = "fp32-elementwise-tail-sets-activation-peak"
@@ -126,6 +223,43 @@ detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/budget.py"]
 
 [[issue]]
+id            = "oe-onnx-fed-back-into-generate-double-preprocessed"
+failure_class = "COMPILER_INPUT_PREPROCESSED_TWICE"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: feeding stedgeai's own *_OE_*.onnx back into `generate`
+    preprocesses it a second time and reports a different, wrong epoch mix
+    """
+symptom       = """
+    The compile succeeds and the report reads like a real result. In an option
+    sweep on a 45-epoch Citrinet-256 prefix, dropping `--Oauto-sched` appeared
+    to collapse the graph to 84 epochs with 57 software epochs. The true figure
+    for that option set is 45 epochs, 0 SW, 500 kB cpuRAM2 instead of 200 kB.
+    The wrong number was written into a design document
+    (compile/DECISION-oauto-sched.md) before a control run against the
+    known-good configuration caught it (board/GATE4.md:818-836).
+    """
+cause         = """
+    The already-preprocessed `*_OE_3_3_1.onnx` left by a previous compile was
+    used as the input model, and `stedgeai generate` preprocessed it again.
+    Nothing in the tool refuses, or warns about, an input it produced itself.
+    """
+workaround    = """
+    Refuse an input whose file name matches `*_OE_*.onnx` before calling
+    `generate`, unless it is deliberate: stm32n6-stt's compile/gen_model.sh
+    does exactly that (`:179-187`, override with `--allow-oe`). Compile from
+    the authored or patched ONNX, and bracket any option sweep with a control
+    compile whose numbers are already known. The file name is the only
+    discriminator recorded; whether a double-preprocessed graph is
+    recognisable from its contents has not been established.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = true
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/compile/gen_model.sh", "/home/claroche/stm32n6-tts/firmware/WORKLIST.md"]
+
+[[issue]]
 id            = "qdq-graph-charged-one-byte-per-element"
 failure_class = "MEMORY_ACCOUNTING_WRONG_DTYPE"
 stage         = "lint"
@@ -204,6 +338,40 @@ detectable_statically = true
 sources       = ["/home/claroche/eco8-neaixt/convfsenet/quant.py"]
 
 [[issue]]
+id            = "reducemean-single-spatial-axis-hybrid-transpose"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: ReduceMean over the H axis alone compiles to a hybrid Transpose
+    epoch; the same mean over (H, W) is a HW GlobalAveragePool
+    """
+symptom       = """
+    A mean over frequency (H) of a (1, C, H, 1) tensor compiles and is
+    numerically right, but goes through a hybrid Transpose epoch that breaks an
+    otherwise all-HW epoch-controller blob: N6Net-v2 at 64 rows with four
+    `gap` branches compiled to 43 stages in 5 EC blobs plus 4 hybrid Transpose
+    epochs before the fix, and to one blob after it.
+    """
+cause         = """
+    Neural-ART maps a spatial mean to HW only as GlobalAveragePool over both
+    spatial axes; a ReduceMean over H alone is rearranged through a Transpose
+    first (from the compile probes; mechanism not documented by ST here).
+    """
+workaround    = """
+    When the reduced tensor has W == 1 (one streaming frame), reduce over (H, W)
+    instead - same numbers, HW GlobalAveragePool (`FullBand.forward` in
+    n6net/model_v2.py). The broadcast Add that puts the height-1 result back on
+    the trunk is HW and ran correctly on the board (`gap` probe: 0.109 ms, cos
+    1.000000). Lint predicate: ReduceMean whose axes cover exactly one of the
+    two spatial axes.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md"]
+
+[[issue]]
 id            = "software-epoch-op-tier"
 failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
 stage         = "lint"
@@ -216,10 +384,17 @@ symptom       = """
     A graph using ReduceSum, Greater, GreaterOrEqual, Less, LessOrEqual, Log,
     Gather, Tile or Resize compiles cleanly and produces correct results, but
     each such op is mapped to a Cortex-M55 software epoch (or forces a float
-    fallback), costing an NPU pipeline teardown, a memory round-trip and cache
-    maintenance. Nothing flags it: STM32N6_ALLOWED_OPS accepts these because
-    they ARE in ST's mapping table, just slowly - so a regression that
+    fallback), costing an NPU pipeline teardown, a memory round-trip and
+    cache maintenance. Nothing flags it: STM32N6_ALLOWED_OPS accepts these
+    because they ARE in ST's mapping table, just slowly - so a regression that
     reintroduces an un-substituted form is invisible at compile time.
+    Observed in the N6Net probes (stedgeai 4.0.1, n6-noextmem-ec): Tile runs
+    as one SW epoch (12 kB on the M55) and splits an all-HW graph into two
+    epoch-controller blobs; Resize 1 -> 128 followed by Add is folded back
+    into a HW broadcast Add; Resize, ConvTranspose and an H-only pixel
+    shuffle used to upsample along frequency go partly hybrid (DepthToSpace,
+    Concat, Pad, Transpose), and an AveragePool pyramid gives hybrid Pad
+    epochs.
     """
 cause         = """
     ST maps this op tier to software rather than to the Neural-ART accelerator.
@@ -229,16 +404,18 @@ workaround    = """
     Hand-substitute with HW-mapped equivalents - documented: ReduceSum ->
     ReduceMean*N, tensor-Div -> Reciprocal*Mul, Greater -> Equal - and lint
     against the stricter DNSMOS_DEVICE_OPS (= STM32N6_ALLOWED_OPS minus
-    {ConvTranspose, Div, Greater, GreaterOrEqual, Less, LessOrEqual, ReduceSum,
-    Resize, Gather, Tile}) rather than the permissive set, so the substitution
-    cannot regress unnoticed. Report software_epoch_ops() as a separate warning
-    tier for graphs that legitimately keep them.
+    {ConvTranspose, Div, Greater, GreaterOrEqual, Less, LessOrEqual,
+    ReduceSum, Resize, Gather, Tile}) rather than the permissive set, so the
+    substitution cannot regress unnoticed. Report software_epoch_ops() as a
+    separate warning tier for graphs that legitimately keep them. To put a
+    height-1 tensor back onto a full-height one, use a broadcast Add (HW,
+    and board-verified to run) instead of Tile or Resize.
     """
 patch         = "substitute_software_epoch_ops"
 silent        = true
 is_infra      = false
 detectable_statically = true
-sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
+sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/host/fullband_probes.py"]
 
 [[issue]]
 id            = "spectral-norm-power-iteration-traced-into-graph"
@@ -310,6 +487,49 @@ detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/export.py", "/home/claroche/eco8-neaixt/convfsenet/quant.py"]
 
 [[issue]]
+id            = "stride3-conv-software-epoch"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    SILENT: LiSenNet's k=(2,5), stride-(1,3) down-sampling convs run as
+    Cortex-M55 software epochs in every variant
+    """
+symptom       = """
+    Compiles and runs correctly; the cost sits in the SW column. In LiSenNet's
+    windowed graph the 6 SW epochs cost 38.1 ms of 73.6 ms per window (52%):
+    23.2 ms for the three encoder down-sampling convs (k=(2,5), stride (1,3)
+    over frequency) and 14.9 ms for the Gather layout ops (npu_profiler). In
+    the streaming graphs the same three convs stay SW in every variant (always
+    6 SW epochs: 3 Conv + 3 Gather); in the nc20-shaped streaming graph they
+    cost 0.063 / 0.048 / 0.045 ms. Grouping them in an ensemble fold multiplied
+    that to 0.465 / 0.250 / 0.194 ms at K=2.
+    """
+cause         = """
+    The source's words: "a geometry the conv engine won't map". Which attribute
+    triggers it - stride 3, the 5-wide kernel under that stride, or the 2-row
+    kernel - was not isolated. Inference: stride 3 is the likely trigger, since
+    stride 2 and 4 along H map to HW in N6Net and a stride-(1,3)
+    ConvTranspose in the same LiSenNet decoder is expanded into HW convs.
+    """
+workaround    = """
+    Budget a stride-3 Conv as a SW epoch; if the NPU share matters, re-shape
+    the down-sampling (stride 2/4, or a strided k x 1 along H, both HW in
+    N6Net) and re-read the generate report. Note that the ensemble lab log's
+    rule "grouped convs with 2-D kernels fall to SW" rests on these same three
+    convs, which were already SW ungrouped (base_fixed.txt: epochs 10/19/29 are
+    SW Conv); its probe only shows grouped 1x1 and depthwise 1x3 convs as pure
+    HW. Those grouped stride-3 convs (group = K) ran as SW and did not stall,
+    although the lint predicate of stride2-depthwise-conv-stalls-npu (group >
+    1 and stride > 1) would flag them - that stall concerns HW-mapped
+    depthwise convs. Lint predicate: Conv with any stride equal to 3.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/lisennet/model.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/reports/base_fixed.txt", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/prof_base_fixed.log", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/prof_ens_k2_fold.log", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/reports/probe.txt"]
+
+[[issue]]
 id            = "validate-random-feeds-on-stateful-graph"
 failure_class = "MISLEADING_VALIDATION_METRIC"
 stage         = "validate"
@@ -373,6 +593,45 @@ silent        = false
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py"]
+
+[[issue]]
+id            = "gru-op-and-batch-fold-reshape-not-importable"
+failure_class = "UNSUPPORTED_OP_FORM"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    An exported nn.GRU (ONNX GRU plus the reshape that folds an axis into batch)
+    does not compile; the same recurrence written as a t=1 cell of 1x1 convs
+    maps to HW
+    """
+error_signature = "Order of dimensions of input cannot be interpreted"
+symptom       = """
+    LiSenNet's dual-path-RNN bottleneck does not compile: the (b,t,f,d) ->
+    (b*t,f,d) reshape that feeds the GRU fails with "Order of dimensions of
+    input cannot be interpreted". The paper adds that the frequency-axis
+    bidirectional GRU is unimportable in both its fused and unrolled forms (a
+    32-step recurrence explodes to ~850 slices). Even where an ONNX GRU
+    compiles it would run as Cortex-M55 software.
+    """
+cause         = """
+    Neural-ART cannot map the ONNX GRU op, and the front end rejects the
+    rank-changing reshape nn.GRU needs to treat a feature axis as batch.
+    """
+workaround    = """
+    Replace a bidirectional GRU over frequency (fully available every frame)
+    with convs. For a GRU over time, export the streaming step at t = 1 as the
+    gate equations with 1x1 convs over (b, d, 1, f) and the hidden state as an
+    explicit (b, H, 1, f) state tensor (`TimeGRU`, which agrees with nn.GRU to
+    1.2e-7). That graph has 0 GRU ops, its Sigmoid/Tanh/Mul/Sub map to HW (SW
+    epochs stay at the model's usual 6), and it measured 1.822 ms (nc24) and
+    2.181 ms (relu6-deep) per frame against 2.787 / 4.823 ms for the matched
+    conv+FIFO graphs (re-initialised weights). Lint predicate: any GRU, LSTM or
+    RNN node, or a Reshape that folds a non-batch axis into batch.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/paper/main.tex", "/home/claroche/eco8-neaixt/paper/data/board_results.csv", "/home/claroche/eco8-neaixt/README.md"]
 
 [[issue]]
 id            = "non-static-io-shape"
@@ -606,6 +865,40 @@ detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/verify.py"]
 
 [[issue]]
+id            = "two-axis-layernorm-not-npu-mappable"
+failure_class = "UNSUPPORTED_OP_FORM"
+stage         = "compile"
+zoo_action    = "lint-rule"
+title         = """
+    A LayerNorm over two axes with a 2-D affine is not NPU-mappable; Neural-ART's
+    LayerNorm takes only a 1-D per-channel affine
+    """
+symptom       = """
+    LiSenNet's 2-axis CustomLayerNorm (33 ReduceMean in the graph) is blocker
+    #1 of four: it lowers to ReduceMean/Sqrt/Div instead of the normalization
+    primitive. Together with blockers #2-#4 the conv variant segfaulted atonn
+    (signo=11) at codegen; the segfault itself was traced to #3 and #4, so
+    whether the LayerNorm alone fails the compile or only falls back to
+    software is not isolated (one source calls it "not NPU-mappable", another a
+    "hard stedgeai blocker").
+    """
+cause         = """
+    Neural-ART's LayerNorm primitive takes only a 1-D per-channel affine; a
+    normalization whose scale/bias span two axes has no HW form.
+    """
+workaround    = """
+    Use a per-channel normalization that folds into the preceding conv
+    (lisennet `norm="batchnorm"`); the hardened LiSenNet with 0
+    LayerNormalization nodes compiles and deploys. Lint predicate: a
+    LayerNormalization, or a ReduceMean/Sub/Pow/ReduceMean/Sqrt/Div chain,
+    whose scale or bias has rank > 1.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/paper/main.tex"]
+
+[[issue]]
 id            = "bool-rooted-mask-chain-unquantizable"
 failure_class = "QUANTIZATION_STRUCTURALLY_UNREACHABLE"
 stage         = "quantize"
@@ -642,6 +935,44 @@ silent        = true
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+
+[[issue]]
+id            = "prelu-float-slope-software-epoch"
+failure_class = "SILENT_SOFTWARE_EPOCH_FALLBACK"
+stage         = "quantize"
+zoo_action    = "graph-patch"
+title         = """
+    SILENT: ORT leaves PRelu slopes as float initializers, and Neural-ART then
+    runs every PReLU as a pure-software epoch
+    """
+symptom       = """
+    The int8 graph compiles and is correct, but each PReLU is a SW epoch on the
+    M55: all 6 in N6Net v1, whose first compile split into 24 epochs (12 HW / 6
+    hybrid / 6 SW). LiSenNet's handover lists PReLU/Mish ("per-channel float
+    slope") as blocker #2: "blocks full int8 / forces M55 hybrid".
+    """
+cause         = """
+    ORT's static quantizer does not quantize the PRelu slope input, and
+    Neural-ART maps PRelu to HW only when the slope is quantized. Equal-valued
+    slopes (e.g. the 0.25 init) are also deduplicated by the exporter into one
+    initializer plus Identity aliases.
+    """
+workaround    = """
+    After quantize_static, fold the Identity aliases and give every PRelu an
+    int8 symmetric per-tensor slope behind a DequantizeLinear
+    (`quantize_prelu_slopes` in n6net/export_npu.py) - 0 SW epochs. The
+    compiler still expands PReLU into HW relu/mul/add epochs: in N6Net v1 the
+    elementwise-only stages were 40% of the cycles for 0.5% of the ops, and
+    PReLU -> ReLU (which fuses into the conv) took the estimate from 1.44 to
+    1.12 ms/frame and 42 to 30 stages. Prefer ReLU where the model allows
+    (lisennet `act="relu"`). Lint predicate: a PRelu whose slope is a float
+    initializer rather than a DequantizeLinear output, and any Mish.
+    """
+patch         = "quantize_prelu_slopes"
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/n6net/export_npu.py", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/paper/main.tex"]
 
 [[issue]]
 id            = "qdq-split-consumers-break-equality-mask"
@@ -684,6 +1015,45 @@ silent        = true
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/src/dnsmos_trainable/export.py"]
+
+[[issue]]
+id            = "state-io-qparams-not-tied"
+failure_class = "STATE_IO_QPARAM_MISMATCH"
+stage         = "quantize"
+zoo_action    = "graph-patch"
+title         = """
+    SILENT: calibrating streaming-state inputs apart from the outputs that feed
+    them gives them different int8 scales, and the state path becomes
+    requantization
+    """
+symptom       = """
+    Quantization succeeds and nothing warns. In N6Net, separate calibration
+    gave each FIFO path (state input, both Concat inputs, Concat output,
+    shifted state output) four slightly different scale/zero-points, which
+    turns the Concat into a requantizing (software) op and the state I/O into a
+    scale conversion. The recipe decides it: ConvFSENet's quantizer had already
+    matched every state_k_in scale to its state_k_out (zp -128, identical to 7+
+    digits).
+    """
+cause         = """
+    quantize_static calibrates each graph input and output independently;
+    nothing ties a state input to the output whose value it receives on the
+    next call.
+    """
+workaround    = """
+    After quantization, copy the qparams of each state output (the block-input
+    column it stores) onto the matching state input's Q/DQ and onto every Q/DQ
+    on the FIFO path (`tie_fifo_qparams` in n6net/export_npu.py). N6Net's
+    compiled state inputs and outputs then share scale/zp (0.0452/0, 0.0470/0,
+    0.0498/-1), no requantization happens between calls so the host threads
+    raw int8, and the int8 mask still matched fp32 at cosine 0.9999. Check:
+    every (state_in, state_out) pair has equal scale and zero-point.
+    """
+patch         = "tie_state_io_qparams"
+silent        = true
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/n6net/export_npu.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md"]
 
 [[issue]]
 id            = "atonn-segfault-empty-pad-constant-value"
@@ -806,23 +1176,26 @@ symptom       = """
     `n6-allmems-O3`.
     """
 cause         = """
-    Asserted to be absent from the STM32N6 target's supported operator set.
-    CAVEAT: the source records no compile attempt, no error message and no
-    report for this claim - and the same repo's lint wrongly rejected
-    InstanceNormalization, which the compiler accepted. Treat the causal half as
-    the author's assumption; the memory consequence is well measured.
+    Mis-asserted: ConvTranspose IS in the device vocabulary. LiSenNet's
+    hardened decoder (upsample="convtranspose", 4-D) compiles and runs on the
+    board, and the compiler expands its ConvTransposes into HW convs. What
+    does not map: a grouped ConvTranspose crashes atonn's expansion pass, and
+    upsampling along frequency via ConvTranspose went partly hybrid in N6Net.
+    The stride-2 Conv input-gradient ConvTransposes of the PESQ backward were
+    never compiled, so whether they would map is untested; the memory
+    consequence of the zero-insertion replacement is well measured.
     """
 workaround    = """
-    Express transposed convolution as zero-insertion upsampling followed by an
-    ordinary Conv, and budget for the extra intermediate (or move to an allmems
-    profile). Before rewriting, attempt the compile - a lint rejection is not a
-    verdict.
+    Try the compile with ConvTranspose first and read the generate report;
+    fall back to zero-insertion upsampling followed by an ordinary Conv only
+    if the ConvTranspose is grouped, fails, or lands in SW/hybrid epochs, and
+    then budget for the extra intermediate (or move to an allmems profile).
     """
 patch         = "zero_insertion_upsample_conv"
 silent        = false
 is_infra      = false
 detectable_statically = true
-sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md"]
 
 [[issue]]
 id            = "dynamo-exporter-shape-subgraph-artifacts"
@@ -937,6 +1310,44 @@ silent        = false
 is_infra      = false
 detectable_statically = true
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
+
+[[issue]]
+id            = "grouped-convtranspose-crashes-atonn-expansion"
+failure_class = "UNSUPPORTED_OP_FORM"
+stage         = "compile"
+zoo_action    = "graph-patch"
+title         = """
+    A grouped ConvTranspose crashes atonn's expansion pass; slicing it per group
+    instead pushes the expanded convs to M55 float software
+    """
+symptom       = """
+    Folding K ensemble members into grouped convs, the grouped ConvTranspose
+    "crashes atonn's expansion pass with garbage dequant scales". The fallback,
+    a per-member Slice -> ConvTranspose -> Concat, compiles, but every expanded
+    transposed conv becomes a SW `Conv(float)` epoch wrapped in SW
+    DequantizeLinear/QuantizeLinear epochs (K=2 fold: SW epochs 6 -> 24, the
+    expanded convs 0.42-0.53 ms each, about 2.79 ms at K=2 and 4.19 ms at K=3),
+    while the same expanded ConvTransposes map to HW in the unfolded graph.
+    """
+cause         = """
+    atonn 4.0.1 does not handle a grouped ConvTranspose in its expansion pass
+    (not diagnosed beyond the garbage-scale observation); the Slice/Concat
+    wrapper then breaks the HW mapping of the expanded convs.
+    """
+workaround    = """
+    Write grouped (per-member) ConvTranspose, and every grouped conv that is
+    not 1x1 or depthwise, as block-diagonal dense: no `group` attribute, zero
+    off-diagonal blocks (they quantize exactly), standard shapes, so the HW
+    mapping survives. In the fold this brought SW epochs back to the baseline's
+    6 and K=2 from 7.387 to 3.762 ms/frame. Keep grouped convs only for 1x1
+    pointwise and depthwise, which the group probe shows as pure HW. Lint
+    predicate: ConvTranspose with group > 1.
+    """
+patch         = "block_diagonal_dense_grouped_convtranspose"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/reports/ens_k2_fold.txt", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/prof_ens_k2_fold.log", "/home/claroche/eco8-neaixt/ENSEMBLE_STUDY_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/build_group_probe.py"]
 
 [[issue]]
 id            = "pad-scalar-constant-value"
@@ -1102,6 +1513,68 @@ detectable_statically = true
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/patch_for_stedgeai.py"]
 
 [[issue]]
+id            = "stride2-depthwise-conv-stalls-npu"
+failure_class = "NPU_STALL_STRIDE2_DEPTHWISE"
+stage         = "runtime"
+zoo_action    = "graph-patch"
+title         = """
+    A stride-2 depthwise convolution compiles clean (0 SW, 0 hybrid epochs)
+    and then stalls the NPU forever on the board
+    """
+symptom       = """
+    Booted from flash, `stai_network_run(..., STAI_MODE_SYNC)` never returns:
+    `LL_ATON_RT_RunEpochBlock()` keeps returning `LL_ATON_RT_WFE` at the epoch
+    holding the stride-2 depthwise convolution. No fault, and no trapped
+    interrupt - all 195 `while (1)` handlers in ST's stm32n6xx_it.c were
+    replaced with a reporter and none fired. `LL_ATON_RT_POLLING` instead of
+    `LL_ATON_RT_ASYNC` behaves identically. Under gdb in development mode the
+    same image looks "pathologically slow" rather than stopped, because debug
+    events keep nudging the WFE loop: 45 epochs did not finish in ten minutes.
+    Observed on Citrinet-256 `Conv2D_70` (group=256, k=[3], stride 2,
+    [1,256,800,1] -> [1,256,400,1]); four structurally identical stride-1
+    depthwise convolutions with the same [256,4,3,1] weight geometry complete
+    immediately before it. All four option sets tried compile it with 0 SW
+    epochs and keep the stride-2 epoch, and `--d-dead` (the compiler's epoch
+    deadlock analysis) at level 9 reports nothing.
+    """
+cause         = """
+    An undocumented Neural-ART defect (silicon or compiler - not determined)
+    specific to stride-2 DEPTHWISE. The stall follows the operator across
+    schedules: `--Omax-ca-pipe 4` (45 epochs) stalls at trace epoch 32 waiting
+    on output engine 0x01, `--Omax-ca-pipe 1` (44 epochs) at trace epoch 31 on
+    0x10 - so it is neither the epoch index nor a particular streaming engine
+    (these are the board's 0-based counter; atonn's epoch_num is two higher,
+    GATE4.md Round 18). A stride-2 group=1 k=1 convolution in the same graph
+    (`/encoder/encoder.{1,7,14}/res.0.0`) executes correctly. Only `Conv2D_70`
+    (k=3) was observed stalling; the full graph's other two sites (k=3 and
+    k=7) were folded before the board reached them, so their stall is
+    inferred. ST's operator documentation does not cover it.
+    """
+workaround    = """
+    Fold the decimation into the pointwise convolution that follows: the
+    depthwise conv gets stride 1 and the group=1, k=1, unpadded conv gets
+    stride 2. With dilation 1 the stride-2 output at i is the stride-1 output
+    at 2i, and the Q/DQ pair between them commutes with decimation. Bit-exact:
+    0 of 3,075,000 output elements differ over 30 random inputs, transcript
+    identical on real speech; no node added. Free on the 45-epoch prefix: 45
+    epochs, 0 SW, 200 kB cpuRAM2, no PSRAM, 540.126 vs 540.157 kB of weights.
+    Reference: model/fold_stride2.py, which discovers sites (every Conv with
+    group>1 and a stride other than 1) and aborts with exit 2 when a site does
+    not match Conv -> Q -> DQ -> Conv(k=1), because a site it cannot fold is a
+    site that will stall the board. It runs on the QDQ graph - it requires the
+    Q/DQ pair between the two convolutions - i.e. AFTER quantisation. Do not
+    use the Slice form (stride-1 conv + Slice(steps=2)): it runs, but costs 4
+    SW epochs and spilled 800 kB of activations to hyperRAM (see
+    hyperram-spill-hardfaults-without-use-ext-sram). Lint predicate: any Conv
+    with group>1 and a stride>1 in the shape-pinned graph.
+    """
+patch         = "fold_stride2_into_pointwise"
+silent        = false
+is_infra      = false
+detectable_statically = true
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/README.md", "/home/claroche/stm32n6-tts/model/README.md", "/home/claroche/stm32n6-tts/model/fold_stride2.py"]
+
+[[issue]]
 id            = "transpose-of-runtime-tensor"
 failure_class = "FRONTEND_INTERNAL_ERROR"
 stage         = "compile"
@@ -1225,6 +1698,54 @@ detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md"]
 
 [[issue]]
+id            = "psram-spill-with-zero-sw-epochs"
+failure_class = "SILENT_ACTIVATION_SPILL_TO_PSRAM"
+stage         = "compile"
+zoo_action    = "compile-postcondition"
+title         = """
+    SILENT: a compile can move activations to PSRAM while still reporting 0 SW
+    and 0 hybrid epochs, and its cycle total goes DOWN
+    """
+symptom       = """
+    The compile succeeds and every headline number looks right. Citrinet-256 at
+    a 12 s window (T=1200), on ST's audio-application mpool with ST's own
+    option string, reports `Total number of epochs 618`, `>> pure software (SW)
+    epochs 0`, `>> hybrid epochs 0` - and puts 150.000 kB of activations in
+    hyperRAM at 0x90000000-0x90025800. The epoch table cannot show it because a
+    spilled buffer is not a software epoch. Worse, the scheduler's own cycle
+    total does not show it either: the spilled build reports 123,775,024 cycles
+    against 124,080,680 for the fully on-chip build, so the spill reads as very
+    slightly FASTER. Measured traffic on the spilled buffer: 153,600 B read +
+    153,600 B written, 1,152,000 modelled cycles.
+    """
+cause         = """
+    The allocator spills to whatever external memory the mpool offers it, and
+    ST's audio mpool offers 16 MB of hyperRAM (xSPI1). Two numbers a reader
+    naturally treats as the health check - the epoch mapping table and the
+    predicted cycle count - are both blind to placement. The cycle model does
+    not price PSRAM pressure, and epochs are about which engine runs an op, not
+    about which pool its buffers landed in.
+    """
+workaround    = """
+    Gate on the per-pool placement line, not on the epoch table and not on the
+    cycle total: assert `hyperRAM ... 0 B` and the expected flash base in
+    `network_generate_report.txt`, both single greps. Two independent
+    cross-checks exist for a clean run: `st_ai_ws/neural_art__network/
+    atonbuf.xSPI1.raw` is 0 bytes, and every `hyperRAM (r/w/cycles)` column of
+    the `--csv-file` output sums to 0. On this graph `--Oauto-sched` removes
+    the spill outright (600.000 kB cpuRAM2 + 417.188 kB npuRAM6, 0 B hyperRAM,
+    628 epochs, 0 SW) - ST's audio application ships WITHOUT that flag, so the
+    option set a firmware integration inherits is the one that spills. If a
+    spill does ship into ST's audio application it is fatal, not just slow:
+    0x90000000 is unmapped unless USE_EXT_SRAM is defined and the first write
+    HardFaults - see hyperram-spill-hardfaults-without-use-ext-sram.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/compile/GATE2.md", "/home/claroche/stm32n6-tts/compile/reports/g1200_st/summary.txt", "/home/claroche/stm32n6-tts/compile/DECISION-oauto-sched.md", "/home/claroche/stm32n6-tts/board/GATE4.md"]
+
+[[issue]]
 id            = "quantize-static-emits-unquantized-graph"
 failure_class = "SILENT_NOOP_QUANTIZATION"
 stage         = "quantize"
@@ -1308,6 +1829,86 @@ detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md", "/home/claroche/dnsmos_exported/src/dnsmos_trainable/export.py"]
 
 [[issue]]
+id            = "activ-to-convacc-stream-link-stalls-npu"
+failure_class = "NPU_STALL_ACTIV_TO_CONVACC_LINK"
+stage         = "runtime"
+zoo_action    = "compile-postcondition"
+title         = """
+    A Relu chained through the stream switch straight into a depthwise
+    convolution's data port (ACTIV -> CONVACC port 0) stalls the NPU forever;
+    the report says 0 SW, 0 hybrid
+    """
+symptom       = """
+    Same board symptom as stride2-depthwise-conv-stalls-npu: one epoch starts
+    and its POST_END never fires; no fault, no interrupt, no timeout. On
+    Citrinet-256 it is the epoch that programs `Relu_857` on ACTIV_ACC_V2 1
+    and `Conv2D_859_subm_0/1/2` (group=256, k=[7,1]) on three CONV_ACC_V2, and
+    it moved with that operator across three schedules. The compile is clean:
+    618 epochs, 0 SW, 0 hybrid under ST's stock options. 36 epochs of the graph
+    carry such a link and the board never completed one; 582 do not and it
+    completes them. Negative control on silicon: `epoch_num 348`, the same
+    k=7 depthwise conv split across three accelerators but fed from a
+    streaming engine (STRENG 0 -> CONVACC 0/1/3 port 0), completes in 178,933
+    cycles. Three rounds first blamed the wrong node (a plain 1x1 conv two
+    epochs earlier) because of an epoch-counter offset - see the amendment to
+    sw-dequantizelinear-epoch-hang.
+    """
+cause         = """
+    atonn canonicalises 1-D convolutions to 2-D and wraps each in Reshape
+    3D<->4D pairs. At `Conv(4D) -> Q/DQ -> Reshape(4D->3D) -> Relu(3D) ->
+    Reshape(3D->4D) -> depthwise Conv(4D)` the leading Reshape becomes an
+    epoch of its own (a STRENG -> STRENG copy) that separates the Relu from its
+    producer, so the compiler chains the Relu FORWARDS into its consumer:
+    `ATONN_DSTPORT(STRSWITCH, 0, CONVACC, u, 0) <- ATONN_SRCPORT(STRSWITCH, 0,
+    ACTIV, v, 0)`. Where nothing separates a conv from its Relu the chain runs
+    CONVACC -> ARITH -> ACTIV -> STRENG and lands in memory; 26 such epochs
+    execute below the stall. Silicon defect or a missing synchronisation /
+    descriptor field in the compiler: open. What the evidence does and does
+    not cover: the compiler emits the link at fan-out 1, 2, 3 and 4 and for
+    depthwise K = 7..12 (not K = 1..6 or 13..15), but none of those
+    reproducers - nor the 9-node one in REPRO-blocker2.md - has been run on a
+    board, so "any ACTIV -> CONVACC link hangs" rests on the 36-of-36 /
+    0-of-582 count in one graph plus the two-epoch control. Records disagree
+    on the kernels: REPRO-blocker2.md and break_relu_chain.py call all 36 sites
+    k=[7]; GATE4.md Round 18b says 20 are k=[7] (encoder.13-17) and 16 k=[9]
+    (encoder.18-21).
+    """
+workaround    = """
+    Postcondition: count stream-switch links in the generated network.c whose
+    destination is a CONVACC port 0 and whose source is an ACTIV unit; a
+    deployable build has ZERO. stm32n6-stt's compile/score_build.py does this
+    (LINK regex at :49-51), and more usefully flags any (dst unit, dst port,
+    src unit) combination outside the set silicon has executed (`PROVEN`,
+    :31-47) - ACTIV -> CONVACC port 0 was exactly such an unproven link. The
+    epoch table cannot see it. Fix in the graph: run the Relu and its Q/DQ on
+    the 4-D tensor, `DQ -> Reshape([0,0,-1,1]) -> Relu -> Q -> DQ ->
+    Reshape([0,0,-1]) -> Conv`, so atonn's fuse_consecutive_reshapes /
+    eliminate_nop_reshape cancel its inserted pair and the Relu chains back
+    into its producer. Exact by construction (max|diff| = 0 over 3,075,000
+    outputs) and cheaper than the graph that stalled: 448 epochs vs 618, 300 kB
+    cpuRAM2 vs 500 kB, 76,000,592 vs 92,450,794 estimated cycles, 124.035 ms
+    measured. Reference: model/break_relu_chain.py (sites discovered; runs on
+    the QDQ graph, after quantisation). SKIP any site whose Relu producer is
+    not a Conv: rewriting `/encoder/encoder.22/mconv.0`, whose Relu follows a
+    residual Add, CREATED a link the baseline did not have. Options measured
+    not to help: --Oconv-split-cw/-kw/-stripe, --Ono-clone-dma, --Oauto-sched,
+    --Omax-ca-pipe 1 (links remain); --Omax-ca-pipe 2 and
+    --Oconv-split-stripe-full (compile fails); --d-onnx-temps (silently
+    ignored, then crashes the wrapper); --onnx-omit-opt split_large_mask_conv
+    (755 epochs, 92 SW, 46 hybrid). Only the debug-only
+    --force-all-in-out-to-mem removes them: 1064 epochs, 0 SW, 800 kB cpuRAM2,
+    194.0 ms measured. No option pins a named node to software; one node can
+    be forced to SW by replacing its weight DequantizeLinear with a float32
+    initializer (DQ -> Conv(float) -> Q as pure-SW epochs - measured on a
+    subgraph), which the record prices at 144 SW epochs for the 36 sites.
+    """
+patch         = "keep_relu_on_4d_tensor"
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/board/REPRO-blocker2.md", "/home/claroche/stm32n6-tts/model/README.md", "/home/claroche/stm32n6-tts/model/break_relu_chain.py", "/home/claroche/stm32n6-tts/compile/score_build.py"]
+
+[[issue]]
 id            = "analytic-activation-peak-is-lower-bound"
 failure_class = "ON_CHIP_ALLOCATION_FAILURE"
 stage         = "compile"
@@ -1349,6 +1950,61 @@ silent        = false
 is_infra      = false
 detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/budget.py"]
+
+[[issue]]
+id            = "full-height-kernel-split-into-subconvs-hangs-npu"
+failure_class = "DEVICE_HANG_IN_REWRITTEN_KERNEL"
+stage         = "runtime"
+zoo_action    = "compile-postcondition"
+title         = """
+    A full-height k x 1 conv (8x1 over 8 rows) is rewritten by the compiler into
+    masked 1x1 sub-convs; the blob compiles clean, then hangs the NPU on target
+    """
+symptom       = """
+    generate succeeds - one epoch-controller blob, 0 SW / 0 hybrid epochs - and
+    the firmware loads, then inference never returns: `validate` times out
+    after 50 s (read timeout). After about three such hangs the board wedges
+    (DEV_USB_COMM_ERR, or AP1 not answering) and needs a physical replug. Hit
+    by N6Net-v2's full-band `pool` branch (`v2_fullband`, `_nopos`, `_lsig`);
+    a five-layer reduction reproduced it with and without the epoch
+    controller, seeded weights, stedgeai 4.0.1, n6-noextmem-ec.
+    """
+cause         = """
+    The compiler rewrites the 8x1 valid conv over 8 rows into eight masked 1x1
+    sub-convs, one per input row, summed by a 7-Add tree (`Conv2D_*_subm_0..7`
+    in network_c_info.json), and that emitted kernel hangs. Board probes split
+    it: the split kernel alone (`fullh_only`) hangs, while the trunk alone (0.100
+    ms), GAP + broadcast Add (`gap`, 0.109 ms) and native strided convs +
+    broadcast Add (`pool_native`, 0.193 ms) run at cos >= 0.999999. The 4x1
+    stride-4 convs, the 4x1 stride-2 stem and 5x1 convs stay single native
+    convs. (fullband_probes.py quotes ST's limit as vertical kernels native up
+    to height 3 only; 4x1 strided and 5x1 stayed native here.) Not checked:
+    whether the hanging builds also carry an ACTIV -> CONVACC port-0 stream
+    link, the stall pattern of activ-to-convacc-stream-link-stalls-npu; the
+    network.c files are not committed.
+    """
+workaround    = """
+    Post-compile gate: flag every `_subm_` node in network_c_info.json and
+    probe it on the board before shipping - the compiler reporting an op as
+    HW-mapped says nothing about whether the kernel it emits executes. Do not
+    reject on the name alone: stm32n6-stt's k=7 depthwise conv split into
+    three `_subm_` parts completed when fed from a streaming engine (see
+    activ-to-convacc-stream-link-stalls-npu). Rewrite a full-height
+    k x 1 valid conv as an (s x 1) stride-s conv emitting one channel block per
+    kernel segment, then a fixed 0/1 (k/s x 1) conv (`native_full_height`,
+    `n6net.export_npu --pool-rewrite native`): exact to 1.2e-7 in fp32, int8
+    mask cosine 1.0000, trained weights carry over, 1.314 ms/frame on board.
+    Or build the branch from native strided convs (`pool_native`, 1.257 ms,
+    needs retraining). Rule for 4.0.1: keep every vertical kernel at a height
+    it compiles whole (<= 5 here, or strided). Probe suspected hangs one cell at
+    a time and stop at the first (`power/probes/run_probes.sh`), so a wedge
+    costs one cell.
+    """
+patch         = "native_full_height"
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/host/fullband_probes.py", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/n6net/export_npu.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/power/probes/run_probes.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/cells.txt"]
 
 [[issue]]
 id            = "int8-grouped-conv-hw-lowering-assert"
@@ -1393,9 +2049,14 @@ title         = """
     """
 symptom       = """
     `n6-noextmem` (weights in npuRAM) cannot compile the graph and the model
-    must fall back to `n6-allmems-O3` with weights in external octoFlash - which
-    for weight-heavy models makes it memory-bandwidth-bound (dense NSNet2: 2.81
-    MB read per frame at 122 MB/s ~= the whole 22.94 ms, RTF 1.43).
+    must fall back to `n6-allmems-O3` with weights in external octoFlash -
+    which for weight-heavy models makes it memory-bandwidth-bound (dense
+    NSNet2: 2.81 MB read per frame at 122 MB/s ~= the whole 22.94 ms, RTF
+    1.43). N6Net-v2 found the weight ceiling at about 1.4 MB in npuRAM3-6
+    (C ~ 128): C128 (1.25 MB of weights) fits with npuRAM3-6 all >= 75% full
+    and two convs dropping from 256 to 160 ops/cycle; C192 (2.83 MB) leaves
+    553 kB unplaced, and on octoFlash its estimate is 17.8 ms at 7.4% MAC
+    utilisation - over the 16 ms hop.
     """
 cause         = """
     The N6 has roughly 1.8 MB npuRAM + 1 MB cpuRAM; the LiSenNet windowed graph
@@ -1403,17 +2064,76 @@ cause         = """
     is 4.15 MB short.
     """
 workaround    = """
-    Check weights+activations against ~2.8 MB before choosing a profile; shrink
-    weights (structured-sparsity re-export took monarch_full 2.85 MB -> 0.86 MB
-    file / 0.72 MB on-chip) or accept `n6-allmems-O3` where the weight traffic
-    is small enough to be free (492 KiB streams at ~13 MB/s at no cost). Weights
-    are countable from the ONNX but the activation total comes from the
-    compiler's allocator, so the decision needs a compile.
+    Check weights+activations against ~2.8 MB, and weights alone against
+    ~1.4 MB, before choosing a profile; expect slower conv scheduling as the
+    pools approach full. Shrink weights (structured-sparsity re-export took
+    monarch_full 2.85 MB -> 0.86 MB file / 0.72 MB on-chip) or accept
+    `n6-allmems-O3` where the weight traffic is small enough to be free (492
+    KiB streams at ~13 MB/s at no cost). Weights are countable from the ONNX
+    but the activation total comes from the compiler's allocator, so the
+    decision needs a compile.
     """
 silent        = false
 is_infra      = false
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md"]
+
+[[issue]]
+id            = "app-slot-512k-overflow-into-weights"
+failure_class = "FLASH_SLOT_OVERFLOW_OVERWRITES_WEIGHTS"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    SILENT: the application slot between 0x70100000 and the weight base is
+    512 KiB, and a large generated `network.c` overflows it into the weights
+    """
+symptom       = """
+    The build succeeds and the flash writes succeed. ST's layout puts the
+    signed application at 0x70100000 and the weight blob at 0x70180000, which
+    leaves the application exactly 524,288 B. Stock (ST's Yamnet-1024 AED
+    model) is 244,544 B and nothing complains. Citrinet-256 at T=800 produces a
+    9,967,286 B `network.c` against the AED model's 810,318 B; its object file
+    alone is 520,957 B of read-only image (437,705 B .rodata of epoch and
+    descriptor tables, 83,252 B .text), and the linked binary is 714,432 B -
+    190,144 B past the slot. Flashing it would write the tail of .text over the
+    start of the weight blob, after which the network reads garbage while every
+    log looks clean. (Caught by comparing the binary size to the slot. It did
+    happen at least once on this bench - a 714,560 B signed image was written
+    into the 512 KB slot during Gate 4 rounds in which every flash boot read as
+    silent for an unrelated reason - so its effect on the weights was never
+    isolated.)
+    """
+cause         = """
+    Nothing in the toolchain knows about the slot. It is the distance between
+    two addresses chosen in two different scripts - the app base in
+    `sign-and-flash-model.sh` and the `--change-addresses 0x70180000` in
+    `generate-n6-model.sh` - and the linker script describes RAM, not this. A
+    model's contribution to image size is its epoch table, which scales with
+    epoch count rather than with weights or MACs, so a small model with many
+    epochs is the dangerous shape.
+    """
+workaround    = """
+    Move the weight base. 0x70400000 gives the application 3 MB and costs
+    nothing: recompiled there, Citrinet-256 is still 628 epochs, still 0 SW and
+    0 hybrid, still 625.000 kB of activations in cpuRAM2 + npuRAM6, only the
+    octoFlash range moves (0x70400000-0x70DBA700). Change it in BOTH places -
+    the mpool's octoFlash offset and the objcopy `--change-addresses` - or the
+    blob and the compiled base disagree silently. Then add
+    `arm-none-eabi-size` against the slot to the build script and fail loudly.
+    Verified on silicon: Citrinet images of 722 kB to 727,168 B boot from
+    flash at 0x70100000 with weights at 0x70400000 (Gate 4 Rounds 13-20);
+    board/flash_and_verify.sh refuses an image that would reach the weights
+    base and reads the app region back after writing. The flash slot is not
+    the only ceiling: ST's FSBL copies the image into SRAM at 0x34000000 with
+    no size check, and ST's boot document draws the user app as
+    0x34000000-0x34180000 (1.5 MB) because the FSBL itself lives at
+    0x34180000-0x34200000, so an image beyond ~1.5 MB would presumably
+    overwrite the FSBL during its own copy (inference; not tested).
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/WORKLIST.md", "/home/claroche/stm32n6-tts/compile/reports/g800_stt_0x70400000/summary.txt", "/home/claroche/stm32n6-tts/compile/stt_audio.mpool", "/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/board/BUILD.md", "/home/claroche/stm32n6-tts/compile/gen_model.sh"]
 
 [[issue]]
 id            = "compiler-chooses-io-layout-per-graph"
@@ -1448,6 +2168,51 @@ silent        = true
 is_infra      = false
 detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md"]
+
+[[issue]]
+id            = "flash-boot-output-lost-in-usbipd-reattach-gap"
+failure_class = "BOOT_OUTPUT_LOST_IN_REENUMERATION"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA, SILENT: a flash boot is a power cycle, the VCP re-enumerates, and
+    everything printed in the first ~8 s is lost - an early hang reads as a
+    dead board
+    """
+symptom       = """
+    "0 bytes" on the UART after every flash boot of a model image, read for
+    six rounds as "the image dies before main" - while the board was in fact
+    printing about five lines within two seconds of boot and then hanging in
+    the NPU invoke. A working control (ST's AED model) looked different only
+    because its inference returns, so its loop prints forever and is
+    eventually seen. Measured: the serial port lost at 98.5 s and reopened at
+    106.3 s, a 7.8 s re-enumeration gap under usbipd. A RAM-pressure test, a
+    known-good control, an app-size and weight-base bisection, an FSBL
+    disassembly and a read of ST's boot documentation (GATE4.md Rounds 3-7)
+    were all spent on an artefact of the listening window.
+    """
+cause         = """
+    Booting the DK from flash needs a power cycle, not the reset button
+    (board/BUILD.md:315, :372-373), and the ST-LINK USB carries both the
+    board's power and the VCP, so every flash boot re-enumerates the serial
+    port; under WSL/usbipd the re-attach took ~8 s. One-shot output emitted at
+    power-on lands in a window in which nothing is listening. How long the gap
+    is on a native Linux host was not measured.
+    """
+workaround    = """
+    Make early output outlast the gap and never reason from absence.
+    stm32n6-stt holds one HAL_Delay(12000) after UART_Config(), loops the
+    result print, and (behind a define) writes one raw character straight into
+    USART1->TDR after each init step, so the last character received names the
+    last step completed. An earlier version held every marker for 2 s, which
+    put ~32 s in front of the invoke and was later misread as NPU slowness -
+    keep such holds out of anything timed. Read the flash back before blaming
+    the image.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/board/BUILD.md", "/home/claroche/stm32n6-tts/README.md"]
 
 [[issue]]
 id            = "int8-forward-systematic-mos-bias"
@@ -1552,16 +2317,22 @@ symptom       = """
     output mid-line and stops it; no error, no crash - the run looks like a
     device hang or a missing result.
     """
-cause         = "The firmware project does not link newlib's float printf support."
+cause         = """
+    The firmware project does not link newlib's float printf support:
+    newlib-nano drops %f unless the link line carries `-u _printf_float`.
+    """
 workaround    = """
     Print IEEE-754 bit patterns as hex words instead of using %f - this is how
     the constant-output defect was captured byte-for-byte (0x808080F2,
-    0x7FC00000). Not a model failure.
+    0x7FC00000). Not a model failure. Alternatively add `-u _printf_float` to
+    the link line; stm32n6-stt formats its level banner with integer-only
+    snprintf so that a missing float printf can never be the reason a warning
+    fails to appear.
     """
 silent        = true
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/stm32n6-tts/firmware/FRONTEND.md"]
 
 [[issue]]
 id            = "reloc-copy-io-inert-constant-input"
@@ -1602,6 +2373,112 @@ silent        = true
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_router/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_optionC/README.md"]
+
+[[issue]]
+id            = "signing-without-align-unbootable-image"
+failure_class = "SILENT_UNBOOTABLE_SIGNED_IMAGE"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    SILENT: signing without `-align` computes the wrong entry point and the
+    board is completely dead with byte-perfect flash
+    """
+symptom       = """
+    No output at all, at any baud, in either boot-switch position, after a
+    power cycle or a reset. Every step reports success: the build links, the
+    signing tool exits 0, all three flash writes print `File download
+    complete`, and a read-back from the board matches the signed binary
+    byte-for-byte (both 0x70000000 and 0x70100000 begin `53544d32`, `STM3`).
+    Indistinguishable from a dead board, a wrong baud, a bad clock config or a
+    hang in early init - all of which were eliminated one by one first, at the
+    cost of most of a day and several boot-switch round trips.
+    """
+cause         = """
+    `STM32_SigningTool_CLI --align` pads the payload to a 0x400 offset. Without
+    it the payload does not begin at file offset 0x400. A disassembly of ST's
+    FSBL (FSBL/ai_fsbl.hex v1.4.0, md5 652478c952cb1a7a95e7b6c80f862433) shows
+    what that breaks: the FSBL copies `*(hdr+0x6C) + 0x400` bytes byte by byte
+    from 0x70100000 to 0x34000000 with no size cap, checksum or validation,
+    sets VTOR = 0x34000400, loads MSP from 0x34000400 and the entry from the
+    APP'S VECTOR TABLE at 0x34000404, clears MSPLIM, and jumps. It never reads
+    the header's entry field at +0x70. So without -align the vector table does
+    not land at 0x34000400 and the FSBL jumps through garbage; the +0x70 word
+    is a checkable symptom of the same misalignment, which is why the
+    two-command check below works. Measured on one identical .bin: ST's
+    Makefile flags (`-s -bin -nk -t ssbl -hv 2.3`) write +0x70 = 0x34002F79, in
+    the middle of .text (0x34000750-0x3401ACC8); adding `-align` writes
+    0x340167BD, which is Reset_Handler and the ELF entry point. The code was
+    never broken: under the documented dev-mode gdb workflow (no FSBL) the same
+    image reaches MPU_Config -> Int_Mem_Config -> Ext_Mem_Config -> NPU_Config
+    -> IAC_Config -> UART_Config in order and runs. `-align` is mandatory on
+    CubeProgrammer 2.21+ (this bench runs 2.22.0) and ST's own `bm.mk:39` does
+    not pass it.
+    """
+workaround    = """
+    Sign with `-align`:
+        STM32_SigningTool_CLI -s -bin app.bin -nk -t ssbl -hv 2.3 -align -o app_sign.bin
+    Then VERIFY BEFORE FLASHING - the word at +0x70 of the signed image must
+    equal Reset_Handler from `nm`. Two commands, and they catch a silently
+    unbootable image before it costs a boot-switch round trip:
+        test "$(xxd -e -g4 -s 0x70 -l 4 app_sign.bin | awk '{print $2}')" \\
+           = "$(arm-none-eabi-nm app.elf | awk '/ Reset_Handler/{print $1}' \\
+                | sed 's/^0*//' | awk '{printf "%x\\n", strtonum("0x"$1)+1}')" \\
+          && echo "entry point OK"
+    `-ep <addr>` also works and `-align -ep -la` works; plain ST flags do not.
+    NOTE the near miss: `config/toolchain.toml` already carried the knowledge
+    ("2.21 introduced the mandatory -align on signing"). The note existed and
+    was simply never connected to a symptom that looks like a dead board, which
+    is the argument for keeping this catalogue keyed on SYMPTOMS.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE3.md", "/home/claroche/stm32n6-deployment-zoo/config/toolchain.toml", "/home/claroche/stm32n6-tts/board/GATE4.md"]
+
+[[issue]]
+id            = "st-fuse-vddio-programs-otp-on-first-boot"
+failure_class = "IRREVERSIBLE_OTP_PROGRAMMING"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA, SILENT, IRREVERSIBLE: ST's GettingStarted app programs OTP word 124
+    (HSLV_VDDIO2/3) on the first boot of a fresh DK, with no prompt
+    """
+symptom       = """
+    Nothing at all on a DK whose fuses are already set, which is why it goes
+    unnoticed. On a fresh board, running even ST's unmodified application -
+    the conventional safe warm-up - permanently programs OTP word 124 bits 15
+    and 16. A read-only dump of the board used here returned word 124 =
+    0x00018000, both bits already set, so the program branch never ran.
+    """
+cause         = """
+    `Projects/GS/Src/audio_bm.c:108` calls fuse_vddio() unconditionally under
+    `#if (defined(USE_STM32N6xx_NUCLEO) || defined(USE_STM32N6570_DK))`, and
+    `Drivers/BSP/STM32N6570-DK/stm32n6570_discovery.h:59-61` self-defines
+    USE_STM32N6570_DK - it is not a Makefile option you can decline.
+    fuse_hardware_conf() (`Projects/Common/misc_toolbox.c:69-107`) reads word
+    124 and, if the mask is clear, calls HAL_BSEC_OTP_Program() and verifies
+    or spins in while(1). Bit 16 is HSLV_VDDIO2 (PSRAM / XSPIM1), bit 15
+    HSLV_VDDIO3 (external flash / XSPIM2). board/OTP.md states that weights
+    streaming from xSPI2 does not work without HSLV_VDDIO3, consistent with
+    the bits being set on a board that had already run seven zoo models from
+    external flash.
+    """
+workaround    = """
+    Read OTP before the first flash: `STM32_Programmer_CLI -c port=SWD
+    mode=HOTPLUG -el <CubeProgrammer>/bin/ExternalLoader/OTP_FUSES_STM32N6xx.stldr
+    -otp displ`, line 124 (after any flash boot use mode=UR instead, see
+    hotplug-fails-after-first-boot-from-flash). On a DK the fuses are correct
+    for its 1.8 V IO rails and the burn is expected. On a custom board whose IO
+    rails are not 1.8 V, blowing HSLV is a hardware fault: remove the
+    fuse_vddio() call before running ST's app there. Word 124's own status read
+    0x00000000 (not write-locked), so its other bits remain programmable by
+    anything that asks.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/OTP.md", "/home/claroche/stm32n6-tts/README.md", "/home/claroche/stm32n6-tts/docs/FEASIBILITY.md"]
 
 [[issue]]
 id            = "sw-epoch-large-output-corruption"
@@ -1688,15 +2565,70 @@ cause         = """
     """
 workaround    = """
     Gate every measurement on the loader printing \"Start operation achieved
-    successfully\" and abort the run otherwise; never let a harness proceed to
-    validate after a failed load. Cross-check the reported MACC/epoch count
-    against the model's own `network_generate_report.txt` before trusting a
-    latency figure.
+    successfully\" and abort the run otherwise; never let a harness proceed
+    to validate after a failed load (measure_streaming.sh / measure_n6net.sh
+    retry the load up to 3 times, then refuse). Cross-check the reported
+    MACC/epoch count against the model's own `network_generate_report.txt`
+    before trusting a latency figure. A stronger check used on 2026-09-17:
+    compare the firmware's own cycle-count timing of the same network (ST's
+    port_dwt API - see npu-cycle-counter-dwt-dead-and-reset-in-aidpuprocess)
+    with validate's duration (all 22 N6Net campaign runs within 3.2%); a
+    stale resident model would fail it.
     """
 silent        = true
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/scripts/measure_n6net.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/scripts/measure_streaming.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_ledger.csv"]
+
+[[issue]]
+id            = "ai-dpu-model-check-rejects-int8-rank3-output"
+failure_class = "APP_MODEL_CHECK_REJECTS_VALID_OUTPUT"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    `ai_dpu.c`'s model check rejects int8 rank-3 outputs into Error_Handler()
+    and a hang; it passes ST's own models only because those are float32
+    """
+error_signature = "AI_DPU: Output format not supported"
+symptom       = """
+    The application prints its banner, then stops for good. The last line is
+    `AI_DPU: Output format not supported`, followed by `AI_DPU: Check model
+    Failed`, after which `AiDPULoadModel()` calls `Error_Handler()`, which is
+    `__disable_irq(); while(1);`. Nothing else ever prints and no fault is
+    raised, so it reads as a startup hang rather than as a rejected model.
+    (Signature transcribed from the source literal at `Projects/Dpu/
+    ai_dpu.c:109`, reached via `LogError` at LOG_ERROR, which the package's
+    default LOG_LEVEL=LOG_INFO does print - `Projects/Common/logging.c`,
+    `LogLevel <= LOG_LEVEL`. It was predicted from the source and patched
+    before flashing, so this exact line has not been read off a UART here.)
+    """
+cause         = """
+    `AiDPUCheckModel()`, `Projects/Dpu/ai_dpu.c:99-107`:
+        if (STAI_FORMAT_FLOAT32 != pxInfo->outputs[i].format &&
+            2 != pxInfo->outputs[i].shape.size)
+    `stai_shape` is a `stai_array_s32`, so `.size` is the RANK, not a byte
+    count. A CTC head is `STAI_FORMAT_S8` at rank 3 - {100, 1025, 1} here - so
+    both conjuncts hold and the model is rejected. ST's own AED and SE models
+    survive the check only because their outputs are float32. The INPUT check
+    at :88-98 is fine: it short-circuits on STAI_FORMAT_S8.
+    """
+workaround    = """
+    Add the format to the disjunction:
+        if (STAI_FORMAT_FLOAT32 != pxInfo->outputs[i].format &&
+            STAI_FORMAT_S8      != pxInfo->outputs[i].format &&
+            2 != pxInfo->outputs[i].shape.size)
+    Also note that `AiDPULoadModel()` indexes `shape.data[AI_DPU_WIDTH=1]` and
+    `[AI_DPU_HEIGHT=2]` into in_width/in_height/out_height, which on a rank-3
+    tensor yields meaningless values (in_width=800, in_height=1,
+    out_height=1025). Harmless as long as nothing downstream reads them, which
+    stops being true if `printInferenceResults` is kept. Verified on silicon
+    at Gate 4: with the S8 disjunct, AiDPULoadModel() returns DPU_OK for the
+    int8 rank-3 CTC head, both under gdb and booted from flash.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/WORKLIST.md", "/home/claroche/stm32n6-tts/firmware/apply_vendor_mods.sh", "/home/claroche/stm32n6-tts/vendor/STM32N6-GettingStarted-Audio/Projects/Dpu/ai_dpu.c", "/home/claroche/stm32n6-tts/board/GATE4.md"]
 
 [[issue]]
 id            = "boot-switch-not-in-development-mode"
@@ -1752,12 +2684,106 @@ workaround    = """
     Use the package's `mcu_cache_*` helpers: clean D-cache after writing NPU
     inputs, invalidate before reading outputs, on EVERY inference. Note this was
     explicitly ruled out as the cause of the large-SW-epoch-output corruption,
-    so eliminating it does not explain that defect.
+    so eliminating it does not explain that defect. In
+    STM32N6-GettingStarted-Audio the only clean is inside the PRE-PROCESSOR,
+    not the AI wrapper (Projects/Dpu/preproc_dpu.c:144 cleans the spectrogram
+    before AiDPUProcess()), and nothing invalidates the output anywhere,
+    because the stock AED output is float32 read from a coherent buffer.
+    Replacing ST's pre-processing with your own front end - which any non-AED
+    audio model needs - silently drops the input clean: add
+    mcu_cache_clean_invalidate_range() on the input after writing it and
+    mcu_cache_invalidate_range() on the output after stai_network_run().
+    (stm32n6-stt added both; its output was not observed stale without the
+    invalidate, so that half is insurance rather than a measured fix.)
     """
 silent        = false
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_optionC/README.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_optionC/README.md", "/home/claroche/stm32n6-tts/firmware/WORKLIST.md", "/home/claroche/stm32n6-tts/firmware/vendor-mods/gate4.patch"]
+
+[[issue]]
+id            = "hyperram-spill-hardfaults-without-use-ext-sram"
+failure_class = "UNMAPPED_EXTERNAL_RAM_SPILL"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: a compile that places activations in hyperRAM HardFaults in ST's
+    audio app - 0x90000000 is never mapped unless USE_EXT_SRAM is defined
+    """
+symptom       = """
+    The network runs the epochs before the spill and then the part dies: the
+    first write to 0x90000000 raises an imprecise bus error that escalates to
+    HardFault (CFSR = 0x00000400, BFSR.IMPRECISERR, HFSR.FORCED). Because ST's
+    fault handlers are `while (1)` traps, that is a silent hang unless a fault
+    reporter is installed. Hit with a graph rewrite (stride-1 conv + Slice)
+    that made the compiler spill 800 kB of activations to hyperRAM.
+    """
+cause         = """
+    `Ext_Mem_Config()` gates `BSP_XSPI_RAM_Init()` behind USE_EXT_SRAM, which
+    STM32N6-GettingStarted-Audio does not define, while ST's audio mpool
+    offers the compiler hyperRAM at 0x90000000 / 16 MB. Nothing ties the
+    compile's placement to the firmware's memory initialisation.
+    """
+workaround    = """
+    Treat any non-zero hyperRAM line in network_generate_report.txt as a
+    firmware requirement: either build with -DUSE_EXT_SRAM (initialises the
+    board's APS256 PSRAM and memory-maps 0x90000000; with it the same image ran
+    to completion repeatedly) or, better, remove the spill from the graph (see
+    psram-spill-with-zero-sw-epochs - a spill is also slow). Leave the define
+    off otherwise: the fold that replaced the Slice needs neither PSRAM nor
+    the define.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/board/BUILD.md"]
+
+[[issue]]
+id            = "lcd-graft-onto-audio-app-layer0-and-pll4"
+failure_class = "LCD_GRAFT_INTEGRATION"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: grafting the DK's LCD onto the audio app - layer 0's stock address
+    is inside the app, the LTDC/DMA2D HAL modules are off, and PLL4 is shared
+    with the microphone
+    """
+symptom       = """
+    Three traps when adding the 800x480 panel (the nine LCD files of ST's
+    ObjectDetection package) to STM32N6-GettingStarted-Audio. (1) Without
+    HAL_LTDC_MODULE_ENABLED / HAL_DMA2D_MODULE_ENABLED the build fails at LINK
+    time with undefined HAL_LTDC_* symbols, not at compile time.
+    (2) BSP_LCD_InitEx() programs layer 0 before the application can call
+    BSP_LCD_ConfigLayer(); the stock LCD_LAYER_0_ADDRESS 0x34000000 is 1 KiB
+    below the app's ORIGIN and LCD_LAYER_1_ADDRESS is inside its .text, so the
+    LTDC would DMA-scan the application's code as pixels. (3) The pixel clock
+    depends on init order. (2) and (3) were found by reading the source and
+    avoided, not observed failing.
+    """
+cause         = """
+    ST's audio package ships the LTDC/DMA2D HAL modules commented out and an
+    `stm32n6570_discovery_conf.h` whose LCD addresses assume another memory
+    layout. `MX_MDF1_ClockConfig()` reprograms PLL4 for the microphone
+    (1376/28 = 49.142 MHz at 16 kHz) and `MX_LTDC_ClockConfig()` takes the
+    pixel clock as IC16 = PLL4/2 = 24.57 MHz from whatever it finds - within
+    2 % of the panel's nominal 25 MHz, which stm32n6-stt calls a coincidence,
+    not a design.
+    """
+workaround    = """
+    Enable both HAL modules in stm32n6xx_hal_conf.h; set LCD_LAYER_0_ADDRESS to
+    0x34200000; call Record_Init() BEFORE BSP_LCD_Init() and print
+    HAL_RCCEx_GetPeriphCLKFreq(RCC_PERIPHCLK_LTDC) at init (measured
+    24,571,428 Hz). No PSRAM is needed: AXISRAM3/4/5 (0x34200000 + 3 x
+    0x70000, up to npuRAM6 at 0x34350000) are clocked by Int_Mem_Config() but
+    claimed by neither the linker script nor stm32n6.mpool, and held the
+    768,000 B framebuffer plus two 256,000 B audio buffers with 92,160 B spare.
+    Mirror ObjectDetection's directory layout for the LCD files so their
+    relative #includes need no edits.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/BUILD.md", "/home/claroche/stm32n6-tts/firmware/FRONTEND.md", "/home/claroche/stm32n6-tts/firmware/WORKLIST.md"]
 
 [[issue]]
 id            = "linker-region-past-0x34200000-stack-in-npuram"
@@ -1788,6 +2814,56 @@ detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_optionC/README.md"]
 
 [[issue]]
+id            = "ll-aton-middleware-version-mismatch"
+failure_class = "STALE_RUNTIME_MIDDLEWARE"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: the app's bundled ll_aton middleware is version-locked to the exact
+    stedgeai build that generated network.c, down to the dev number
+    """
+error_signature = "Possible mismatch in ll_aton library used"
+symptom       = """
+    The FIRMWARE BUILD FAILS - it does not warn - on the generated model
+    source:
+        network.c:57:4: error: #error "Possible mismatch in ll_aton library used"
+    Dropping a model generated by a newer ST Edge AI Core into an application
+    package that vendors an older runtime cannot work, and matching the
+    major/minor is not enough to satisfy it.
+    """
+cause         = """
+    `network.c` guards on all four version components with `!=`, so
+    LL_ATON_VERSION_DEV must be equal too. Measured here: the package ships
+    atonn-v1.1.3-262-g7cc65410, ST Edge AI Core 4.0.1-20581 generates against
+    atonn-v1.1.3-275-g6770925d. Same 1.1.3, different dev, hard error. ST
+    versions the application package and the compiler independently and ships
+    them mismatched.
+    """
+workaround    = """
+    Move the APPLICATION onto the compiler's runtime, not the other way
+    round: copy Inc/Lib/Misc/Npu/Reloc/SystemPerformance from
+    `<stedgeai>/Middlewares/ST/AI` over the package's `Middlewares/ST/AI`,
+    and follow the runtime-library rename in the Makefile
+    (NetworkRuntime1200_CM55_GCC.a -> NetworkRuntime1201_CM55_GCC.a).
+    Downgrading the compiler instead invalidates every compile-stage number
+    already recorded against the model. Two knock-on effects, both hit here:
+    the newer headers stop pulling in `assert.h` transitively, and GCC 14
+    makes an implicit function declaration an error, so
+    `Projects/Common/cpu_stats.c` needs an explicit `#include <assert.h>`.
+    Check the version pair BEFORE generating - one grep of
+    `Middlewares/ST/AI/Npu/ll_aton/ll_aton_version.h` against the toolchain's
+    copy - because the alternative is discovering it after a compile.
+    Verified on silicon (Gate 4 Round 4): ST's AED model regenerated with ST
+    Edge AI Core 4.0.1 runs from flash in ST's otherwise unmodified application
+    on the moved 1.1.3-275 middleware, so the upgrade itself is not a boot or
+    runtime risk.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/README.md", "/home/claroche/stm32n6-tts/firmware/apply_vendor_mods.sh", "/home/claroche/stm32n6-tts/artifacts/model_c/network.c", "/home/claroche/stm32n6-tts/board/GATE4.md"]
+
+[[issue]]
 id            = "loading-internal-memories-overflow-large-epoch-count"
 failure_class = "INTERNAL_RAM_OVERFLOW_AT_LOAD"
 stage         = "board"
@@ -1816,6 +2892,52 @@ silent        = false
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md"]
+
+[[issue]]
+id            = "make-command-line-opt-override-discards-appends"
+failure_class = "BUILD_FLAGS_SILENTLY_DROPPED"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    Overriding `OPT` on the make command line discards every `OPT +=` in ST's
+    Makefile, and the resulting error names a CMSIS-DSP vector type
+    """
+error_signature = "incompatible types when initializing type 'uint16x8_t' using type 'int16x8_t'"
+symptom       = """
+    Adding a define or an include path the obvious way - `make bm OPT="..."` -
+    breaks the build somewhere that has nothing to do with the change:
+        .../StatisticsFunctions/arm_absmax_no_idx_q15.c:59:37: error:
+          incompatible types when initializing type 'uint16x8_t' using type 'int16x8_t'
+              uint16x8_t curExtremValVec = vdupq_n_s16(Q15_ABSMIN);
+    and similarly for q31/q7 in arm_absmax/absmin_no_idx. Nothing mentions the
+    override. Reproduced by re-running one recorded compile line with the flag
+    removed: the first file to fail is
+    Drivers/CMSIS/DSP/Source/StatisticsFunctions/StatisticsFunctions.c.
+    """
+cause         = """
+    A variable set on the make command line overrides every assignment in the
+    makefile, INCLUDING `+=`, unless the makefile marks it `override`. ST's
+    Makefile builds its flags as `OPT = -g3 -Os` (line 5) followed by
+    `OPT += ...` (lines 225-227), so an override silently deletes
+    `-flax-vector-conversions` - which CMSIS-DSP's MVE paths need, because they
+    initialise unsigned vector types from signed `vdupq_n_*` intrinsics - along
+    with `-Wall -fstack-usage -fdata-sections -ffunction-sections
+    --specs=nano.specs` and the `-MMD -MP` dependency generation.
+    """
+workaround    = """
+    Never set OPT on the command line for this package. Add an extension point
+    instead - one line after the last append:
+        OPT += $(EXTRA_CFLAGS)
+    and pass `EXTRA_CFLAGS="-DFOO -I/path"`. The dropped section flags are the
+    part to worry about beyond the loud failure: a build that happens not to
+    touch CMSIS-DSP loses -fdata-sections/-ffunction-sections and grows,
+    which on this part is measured against a hard 512 KiB application slot
+    (see `app-slot-512k-overflow-into-weights`).
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/apply_vendor_mods.sh", "/home/claroche/stm32n6-tts/vendor/STM32N6-GettingStarted-Audio/Projects/GS/Makefile"]
 
 [[issue]]
 id            = "missing-ll-aton-runtimeinit-parks-forever"
@@ -1873,18 +2995,23 @@ cause         = """
     always lands inside that window. NOT the jumpers and not the graphs.
     """
 workaround    = """
-    Read the firmware banner on /dev/ttyACM0 BEFORE blaming hardware - the tell
-    was the first banner line `PWR_DONE fid=4674 sat=46737 rt=1875`, printed by
-    power_loop() on completion. Restore the stock `Core/Src/main.c` from
-    `main.c.pwr_orig` (byte-identical to main.c.rt_bak/main.c.loss_bak) and keep
-    the power version as `main.c.pwr_loop_saved`. Restoring main.c forces a
-    relink, which then trips the GCC_PATH/Error-127 gotcha, so export GCC_PATH
-    too. Always bracket a campaign with a control graph whose latency is known.
+    Read the firmware banner on /dev/ttyACM0 BEFORE blaming hardware - the
+    tell was the first banner line `PWR_DONE fid=4674 sat=46737 rt=1875`,
+    printed by power_loop() on completion. Restore the stock
+    `Core/Src/main.c` from `main.c.pwr_orig` (byte-identical to
+    main.c.rt_bak/main.c.loss_bak) and keep the power version as
+    `main.c.pwr_loop_saved`. Restoring main.c forces a relink, which then
+    trips the GCC_PATH/Error-127 gotcha, so export GCC_PATH too. Always
+    bracket a campaign with a control graph whose latency is known. If main.c
+    is stock and the control graph validates, an E801 'Invalid firmware' at
+    bind for one graph can instead be the validation app rejecting its I/O
+    table (35-in/36-out graphs failed so in validate and npu_profiler; see
+    validate-fails-on-some-multi-io-streaming-graphs).
     """
 silent        = false
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md"]
+sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md"]
 
 [[issue]]
 id            = "ram-firmware-lost-on-power-cycle"
@@ -1914,6 +3041,85 @@ silent        = false
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "st-audio-app-proc-context-overflows-ram-at-long-windows"
+failure_class = "APP_BUFFERS_SCALE_PAST_RAM_REGION"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: ST's audio pre/post-processing contexts scale with the spectrogram
+    length - at 800 columns AudioBM_proc_t alone is 2.07x the app's RAM region
+    """
+symptom       = """
+    Resizing ST's audio application for a model with a longer input window
+    (COL 96 -> 800, NMEL 64 -> 80) fails at LINK time. Measured sizeof() on the
+    target: AudioBM_proc_t 268,048 B at stock -> 2,166,032 B, plus a runtime
+    ring-buffer malloc of 513,280 B: 2,679,312 B against `RAM ... LENGTH =
+    1023K` = 1,047,552 B (STM32N657XX_LRUN.ld:47). A plan that summed only
+    proc_buff + audio_out + the ring buffer (1,026,240 B) predicted a runtime
+    malloc failure; it fails earlier, and by 2.6x.
+    """
+cause         = """
+    AudioProcCtx_f16_t carries `pCplxSpectrum[(NFFT/2+1)*2*COL]` of float16_t
+    (Projects/Dpu/audio_proc.h:64; 822,400 B at NFFT 512, COL 800), and
+    AudioBM_proc_t holds two of them: the post-processing context is #defined
+    to the same type (Projects/Dpu/postproc_dpu.h:37, audio_bm.h:61-62).
+    """
+workaround    = """
+    Do not instantiate ST's pre/post contexts outside the AED geometry: replace
+    AudioBM_proc_t with a bare AIProcCtx_t (stm32n6-stt's GATE4_CANNED path,
+    ~269 KB of .bss saved) and bring your own front end - ST's PreProc_DPU is
+    float16 and cannot express a NeMo-style log-mel anyway (see
+    st-audio-preprocessing-library-cannot-express-nemo-logmel). For capture,
+    keep BSP_AUDIO_IN_Record() and the two transfer callbacks and append into
+    an unclaimed AXISRAM bank (AXISRAM3 at 0x34200000); an utterance design
+    needs no ring buffer. Check `arm-none-eabi-size` against the region rather
+    than a hand-summed table.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/AUDIO-INPUT.md", "/home/claroche/stm32n6-tts/README.md", "/home/claroche/stm32n6-tts/board/BUILD.md"]
+
+[[issue]]
+id            = "st-makefile-passes-fcyclomatic-complexity"
+failure_class = "VENDOR_ONLY_COMPILER_FLAG"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    ST's Makefile passes `-fcyclomatic-complexity`, which is not an upstream
+    GCC option, so the ST-validated Arm GNU 13.3 cannot build ST's own example
+    """
+error_signature = "unrecognized command-line option '-fcyclomatic-complexity'"
+symptom       = """
+    Building STM32N6-GettingStarted-Audio with the toolchain the zoo pins -
+    arm-gnu-toolchain-13.3.rel1, the version ST document as validated for
+    Cortex-M55 - fails immediately:
+        arm-none-eabi-gcc: error: unrecognized command-line option '-fcyclomatic-complexity'
+    The error names a flag, which sends the reader looking for where the flag
+    came from rather than for which compiler is missing.
+    """
+cause         = """
+    `-fcyclomatic-complexity` is an ST addition, present only in the
+    "GNU Tools for STM32" compiler shipped inside STM32CubeCLT / STM32CubeIDE,
+    and `Projects/GS/Makefile:225-226` passes it unconditionally in C_FLAGS.
+    The validated toolchain version and the toolchain that can build ST's own
+    examples are not the same toolchain.
+    """
+workaround    = """
+    Build with ST's compiler:
+        make bm -j8 GCC_PATH=<stm32cubeclt>/GNU-tools-for-STM32/bin
+    (GNU Tools for STM32 14.3.rel1 accepts the flag and builds clean.) A shim
+    that strips the flag also works with vanilla Arm GNU 13.3 and produces a
+    working image - both lineages were flashed and both ran, so this is a build
+    blocker, not a correctness one. Do NOT reach for `OPT=` on the command line
+    to remove it; see `make-command-line-opt-override-discards-appends`.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE3.md", "/home/claroche/stm32n6-tts/vendor/STM32N6-GettingStarted-Audio/Projects/GS/Makefile"]
 
 [[issue]]
 id            = "sw-dequantizelinear-epoch-hang"
@@ -1955,12 +3161,24 @@ workaround    = """
     level to confirm the stop point is reproducible; do not re-flash or
     power-cycle chasing an infra fault. Escalated to ST with
     n6_gen/dnsmos_loss_crop1s_int8_d2 plus the reproduction.
+    Two traps measured later (stm32n6-stt Gate 4). (1) Through the stai API -
+    which ST's GettingStarted applications use - a callback registered with
+    LL_ATON_RT_SetNetworkCallback() is overwritten on every run and never
+    fires; see stai-layer-discards-epoch-callback. (2) Do not assume any fixed
+    offset: a software counter incremented per POST_END equals the index into
+    ll_atonn_rt_epoch_block_array, and atonn's epoch_num there starts at 2
+    (the parameter and input pseudo-epochs), so epoch_num = counter + 2.
+    Print eb->epoch_num, or the in/out streaming-engine masks, and look them up
+    in network.c's epoch-block table; repeating the run on a second schedule
+    (--Omax-ca-pipe 1) separates an operator fault from a schedule fault.
+    Judge a hang from a flash boot: under gdb debug events nudge the WFE loop
+    and a stuck epoch reads as extreme slowness.
     """
 patch         = "crop_adaptation_window_0p25s"
 silent        = false
 is_infra      = false
 detectable_statically = false
-sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md"]
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/firmware/vendor-mods/gate4.patch"]
 
 [[issue]]
 id            = "corporate-pip-mirror-401"
@@ -1992,6 +3210,60 @@ detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
 
 [[issue]]
+id            = "hotplug-fails-after-first-boot-from-flash"
+failure_class = "SWD_CONNECT_MODE_LATCHED_AT_RESET"
+stage         = "board"
+zoo_action    = "infra-retry"
+title         = """
+    INFRA: `mode=HOTPLUG` stops working once a board has been booted from
+    flash, in BOTH switch positions; `mode=UR` still works
+    """
+# Deliberately NO error_signature. This failure prints `Unable to get core ID`
+# and `No STM32 target found`, and the second of those is already the signature
+# of `no-stm32-target-found-on-swd`, whose remedy (press RESET) is a different
+# one. Two entries matching the same text would make which remedy you get an
+# accident of string length. The amendment at the end of this file puts the
+# mode=UR remedy on the existing entry instead, where the match already lands.
+symptom       = """
+    `STM32_Programmer_CLI -c port=SWD mode=HOTPLUG` fails with
+    `Unable to get core ID` / `No STM32 target found` even after the boot
+    switches are returned to the development position - on a board where
+    HOTPLUG worked before it was ever booted from flash. It looks exactly like
+    the wedged-probe entry, whose remedy is a physical replug, and reaching for
+    that first wastes the trip.
+    """
+cause         = """
+    The boot configuration is latched at reset, so moving a switch under power
+    changes nothing until the next reset. HOTPLUG attaches to a running target
+    and never asserts NRST, so it never gets one. `mode=UR` (connect under
+    reset) asserts NRST and catches the part early, which is why it works in
+    both positions.
+    """
+workaround    = """
+    Use `mode=UR` rather than `mode=HOTPLUG` (the zoo's loader path assumes
+    HOTPLUG). Measured access matrix on this board, both positions:
+        operation                    dev      flash-boot
+        mode=HOTPLUG connect         fails    fails
+        mode=UR connect              works    works
+        read external flash          works    works
+        erase / write ext. flash     works    fails
+        ST-LINK_gdbserver halt       fails    fails
+    So erasing needs the development position and reading does not. Separately,
+    `ST-LINK_gdbserver` cannot halt this part at all with `--halt`/`-k`; ST's
+    documented invocation is `-m 1 -g` - access port 1, attach to a RUNNING
+    target - and even that only gets further in the development position.
+    ST's own `make flash_bm` (bm.mk:35) and sign-and-flash-model.sh both use
+    mode=HOTPLUG, so neither works on a board that has been flash-booted. And
+    STM32_Programmer_CLI cannot attach over SWD while the application runs, so
+    a running application's RAM is unreachable from the host: stm32n6-stt had
+    to base64 a 256,000 B capture buffer out over the UART from the firmware.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE3.md", "/home/claroche/stm32n6-tts/board/BUILD.md", "/home/claroche/stm32n6-tts/firmware/FRONTEND.md"]
+
+[[issue]]
 id            = "no-stm32-target-found-on-swd"
 failure_class = "SWD_TARGET_NOT_FOUND"
 stage         = "board"
@@ -2010,11 +3282,20 @@ cause         = """
     re-establishes it. (Source records symptom and remedy only; the mechanism is
     inference.) Board-side only.
     """
-workaround    = "Press the black RESET button on the DK and retry."
+workaround    = """
+    Press the black RESET button on the DK and retry. If that does not help
+    and the board has ever been booted from flash, use `mode=UR` instead of
+    `mode=HOTPLUG`: the boot configuration is latched at reset, HOTPLUG
+    attaches to a running target and never asserts NRST, and mode=UR
+    (connect under reset) catches the part early. See
+    `hotplug-fails-after-first-boot-from-flash` for the measured access
+    matrix - notably that erasing external flash needs the development switch
+    position while reading it does not.
+    """
 silent        = false
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md"]
+sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md", "/home/claroche/stm32n6-tts/board/GATE3.md"]
 
 [[issue]]
 id            = "npu-profiler-per-layer-serial-timeout"
@@ -2034,14 +3315,17 @@ cause         = """
     cost scales with node count.
     """
 workaround    = """
-    Reduce batch size, profile only when the per-epoch split is actually needed,
-    and otherwise take total latency from `validate` - remembering the ~1 ms
-    method offset (see validate-vs-profiler-latency-offset).
+    Reduce the batch size: on the bigger ensemble-fold graphs npu_profiler
+    hung at `-b 16` (telemetry volume) while `-b 1` and `-b 4` worked, and on
+    the baseline b=1 equalled b=16 (2.598 vs 2.598 ms), so single-shot
+    numbers are clean. Profile only when the per-epoch split is actually
+    needed, and otherwise take total latency from `validate`, labelled by
+    method (see validate-vs-profiler-latency-offset).
     """
 silent        = false
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/ENSEMBLE_STUDY_HANDOVER.md"]
 
 [[issue]]
 id            = "stale-gdbserver-or-busy-serial-port"
@@ -2082,14 +3366,20 @@ title         = """
     """
 error_signature = "Loading memories failed ! ST-LINK error (DEV_USB_COMM_ERR) could not connect: Connection timed out"
 symptom       = """
-    `n6_loader.py` aborts with `Loading memories failed !`, sometimes repeatedly
-    for the same graph, then loads first try after a USB cycle; or every
-    subsequent load attempt fails with DEV_USB_COMM_ERR. Triggered by killing a
-    runner mid-inference, by the powerdown reset the loader issues, and
-    sometimes simply by a completed validate run. THE LOAD LOG IS MISLEADING -
-    the real cause is only in `n6_loader.log`. It cost a measurement slot
+    `n6_loader.py` aborts with `Loading memories failed !`, sometimes
+    repeatedly for the same graph, then loads first try after a USB cycle; or
+    every subsequent load attempt fails with DEV_USB_COMM_ERR. Triggered by
+    killing a runner mid-inference, by killing `n6_loader` mid-"Loading
+    memories", by the powerdown reset the loader issues, sometimes simply by
+    a completed validate run, by connecting STM32_Programmer_CLI to the
+    board straight after a validate run (which wedged the ST-LINK itself),
+    and by a graph that hangs the NPU (the board wedges after about three
+    hung attempts: DEV_USB_COMM_ERR, or AP1 not answering). One unprovoked AP1
+    wedge was also seen mid-campaign. THE LOAD LOG IS MISLEADING - the real
+    cause is only in `n6_loader.log`. It cost a measurement slot
     (convfsenet_head_fwd was never measured) and it hit both a band graph and
-    the LiSenNet relu6-deep model, so it is entirely independent of the graph.
+    the LiSenNet relu6-deep model, so it is entirely independent of the
+    graph.
     """
 cause         = """
     The ST-LINK connection forwarded from Windows through usbipd drops on the
@@ -2098,17 +3388,24 @@ cause         = """
     """
 workaround    = """
     Check `n6_loader.log`, not just the load log. Kill any stale
-    `ST-LINK_gdbserver` first, then cycle the attachment: `usbipd detach --busid
-    <id>` then `usbipd attach --wsl --busid <id>` (the busid can change across
-    replug). If the wedge follows a `validate` run, PHYSICALLY re-plug the USB -
-    an SWD software reset does NOT clear it. Never kill runners mid-inference.
-    Any failure recorded while the probe is wedged must be DISCARDED, never
-    attributed to the model.
+    `ST-LINK_gdbserver` first, then cycle the attachment: `usbipd detach
+    --busid <id>` then `usbipd attach --wsl --busid <id>` (the busid can change
+    across replug). After a killed load, `usbipd.exe detach` -> `unbind` ->
+    `bind` -> `attach --wsl`, verified with `STM32_Programmer_CLI -c port=SWD
+    mode=UR`, recovered without a power cycle. If the wedge follows a
+    `validate` run, PHYSICALLY re-plug the USB (CN6) - an SWD or software USB
+    reset does NOT clear it - and never probe the board with
+    STM32_Programmer_CLI between validate runs: validate cells back to back.
+    Never kill runners or loads mid-flight. Harness pattern that held across
+    campaigns: pkill ST-LINK_gdbserver, sleep 5 s, up to 3 load attempts,
+    proceed only on "Start operation achieved successfully". Any failure
+    recorded while the probe is wedged must be DISCARDED, never attributed to
+    the model.
     """
 silent        = false
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/EFFICIENCY_REWORK_PLAN.md"]
+sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/eco8-neaixt/n6_band_debug_kit/RESULTS.md", "/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/EFFICIENCY_REWORK_PLAN.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/power/probes/run_probes.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/scripts/measure_n6net.sh", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/ENSEMBLE_STUDY_HANDOVER.md"]
 
 [[issue]]
 id            = "usbipd-attach-required-and-busid-changes"
@@ -2156,10 +3453,15 @@ title         = """
     """
 symptom       = """
     No error; the power capture completes and yields clean, quotable mW /
-    uJ-per-inference figures. But the baseline phase is not idle, so the deltas
-    are wrong - the giveaway is that `matched - idle` comes out NEGATIVE (-13.6
-    / -11.2 mW). Numbers derived this way were quoted externally before the flaw
-    was found.
+    uJ-per-inference figures. But the baseline phase is not idle, so the
+    deltas are wrong - the giveaway is that `matched - idle` comes out
+    NEGATIVE (-13.6 / -11.2 mW). Numbers derived this way were quoted
+    externally before the flaw was found. Still true on 2026-09-17: the
+    nsnet_dse analyser prints "neither baseline is truly idle -- the idle
+    phases are a HAL_GetTick busy loop while real inference parks the M55 in
+    WFE", matched wait minus idle is -9.2 to -11.6 mW in all 22 N6Net
+    campaign runs, and N6NET_POWER.md states "the board idles at 565 mW" and
+    computes every uJ/inference and mW-rt figure against that bracketed idle.
     """
 cause         = """
     The 'idle' phase is `pwr_spin()`, a `while (HAL_GetTick()-t0 < ms)` busy
@@ -2169,16 +3471,18 @@ cause         = """
     differ in MCU behaviour as well as in NPU work.
     """
 workaround    = """
-    Quote absolute energy on the UTIA matched-wait basis (it at least holds the
-    loop structure fixed) and describe the 0.9144 W figure as 'loaded baseline,
-    MCU spinning', not 'idle'. A true idle requires a WFI/WFE phase in the
-    firmware. Within-firmware ratios (nb 4 vs nb 8) remain valid because both
-    use identical baselines.
+    Quote absolute energy on the UTIA matched-wait basis (it at least holds
+    the loop structure fixed) and describe the 0.9144 W figure as 'loaded
+    baseline, MCU spinning', not 'idle'. A true idle requires a WFI/WFE phase
+    in the firmware. Within-firmware ratios (nb 4 vs nb 8) remain valid
+    because both use identical baselines. The N6Net campaign exports both
+    bases per cell (campaign_cells.csv `uj_idle_base` / `uj_utia_base`, e.g.
+    b3 with epoch controller 444.9 vs 461.4 uJ) - quote both.
     """
 silent        = true
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_runs.csv", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_cells.csv", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/pass1/n6net_b3__n6-noextmem-ec/analyze.txt"]
 
 [[issue]]
 id            = "calibration-set-size-changes-compiled-latency"
@@ -2211,6 +3515,194 @@ silent        = true
 is_infra      = false
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md"]
+
+[[issue]]
+id            = "cmsis-rfft-init-links-every-twiddle-table"
+failure_class = "LIBRARY_TABLES_BLOAT_IMAGE"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: CMSIS-DSP's arm_rfft_fast_init_f32(512) links the twiddle
+    tables of every FFT size (158,052 B), and the vendor flags select the
+    Helium path
+    """
+symptom       = """
+    A minimal whole-program link of a log-mel front end grows from 14,084 B
+    .text + 80 B .data (a built-in radix-2 FFT) to 127,284 B .text + 43,784 B
+    .data with CMSIS-DSP, 158,052 B of it twiddle and bit-reversal tables.
+    Nothing warns - against ST's 512 KiB application slot, with the stock app
+    already at 238.8 KiB. The obvious trim (`-DARM_DSP_CONFIG_TABLES
+    -DARM_FFT_ALLOW_TABLES -DARM_TABLE_TWIDDLECOEF_F32_256
+    -DARM_TABLE_BITREVIDX_FLT_256 -DARM_TABLE_TWIDDLECOEF_RFFT_F32_512`) links
+    at 12,172 B but contains no twiddle tables at all, so
+    arm_rfft_fast_init_f32() would return ARM_MATH_ARGUMENT_ERROR at runtime.
+    """
+cause         = """
+    arm_cfft_init_f32() is one switch over every supported length, so
+    --gc-sections cannot drop any table, and the arm_cfft_sR_f32_* const
+    structs are hidden behind `#if !defined(ARM_MATH_MVEF)`
+    (arm_const_structs.c:95), so they are no escape in a Helium build. With the
+    vendor Makefile's flags (-mcpu=cortex-m55 -mthumb -mfpu=fpv5-d16
+    -mfloat-abi=hard) the preprocessor defines `__ARM_FEATURE_MVE 3`, so
+    CMSIS-DSP compiles its Helium FFT (`_arm_radix4_butterfly_f32_mve`) while
+    an x86 host harness exercises the scalar path, in a different summation
+    order.
+    """
+workaround    = """
+    Check the init status (fail loudly on ARM_MATH_ARGUMENT_ERROR) and check
+    the signed binary against the slot (app-slot-512k-overflow-into-weights).
+    In order of evidence: a self-contained FFT (14,084 B, 1 of 768,000 int8
+    features off by 1 LSB against the oracle on the host, speed on the M55
+    unmeasured); or keep CMSIS in a larger slot - stm32n6-stt shipped CMSIS
+    with the weights moved to 0x70400000; table trimming only once correct
+    macro names are known. The Helium path proved immaterial on silicon: over
+    15 utterances 6 of 960,000 int8 features differed from the host oracle,
+    each by 1 LSB in isolated mel bins, so forcing the scalar path
+    (`-DARM_MATH_AUTOVECTORIZE`) was not needed. Note arm_rfft_fast_f32 packs
+    the Nyquist bin into sp[1]; that is harmless only if nothing reads bin N/2.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/FRONTEND.md", "/home/claroche/stm32n6-tts/docs/GATES-5-6.md", "/home/claroche/stm32n6-tts/board/BUILD.md"]
+
+[[issue]]
+id            = "compiler-power-estimates-underpredict-board"
+failure_class = "ANALYTIC_ESTIMATE_NOT_A_VERDICT"
+stage         = "compile"
+zoo_action    = "document-only"
+title         = """
+    SILENT: the compiler's power_estimates (cycles and energy in
+    network_c_info.json) under-predict the board - energy 3.3-5x low, time
+    13-66% low - and include multi-watt artefact epochs
+    """
+symptom       = """
+    The per-epoch estimates look authoritative. Against the DK on 2026-09-17
+    (N6Net): energy b3 129 uJ estimated vs 445 measured, v2_c96 94 vs 472; time
+    b3 1.39 vs 1.61 ms, v2 (C128) 1.56 vs 2.60 ms. Artefacts: a 257-op input
+    Sub reported 21.6 W over 462k cycles, and each epoch-controller blob
+    carries a 51-82k-cycle controller epoch at a multi-watt level. Placement
+    noise: unchanged 5x1 conv epochs were scheduled at 59-63k cycles instead of
+    46k after a memory-placement shift (same layer, same ops), a noise floor of
+    about +-0.15 ms. A home-made epoch-count regression (R^2 0.972-0.994 on six
+    board-measured graphs) missed an ensemble fold by 2x (3.5-4.3 ms estimated,
+    7.387 ms measured) because SW fallbacks, not epochs, set its cost.
+    """
+cause         = """
+    The static model counts ops and cycles per epoch at the 1 GHz NPU clock and
+    excludes M55 time. The board side is measured at the 5 V input, so
+    regulator losses inflate it (the source's own caveat). An epoch-count fit
+    prices launches, not what runs in each epoch.
+    """
+workaround    = """
+    Use the estimates to rank layouts and to spot mapping problems, never as
+    latency or energy. Drop epochs reporting > 1000 mW (npu_cycle_report.py
+    does), treat differences under ~0.15 ms as noise, and measure on the board
+    (validate or npu_profiler, plus the power harness) before quoting. Rankings
+    and ratios were the reliable part.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/host/npu_cycle_report.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md"]
+
+[[issue]]
+id            = "cpuram2-pool-overlaps-fsbl-region"
+failure_class = "MEMORY_POOL_OVERLAPS_BOOTLOADER"
+stage         = "compile"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: ST's stm32n6.mpool gives cpuRAM2 1024 KB from 0x34100000,
+    straight through the FSBL's 0x34180000-0x34200000; ST's layout guarantees
+    only 512 KB
+    """
+symptom       = """
+    Nothing. ST's Doc/Boot-Overview.md reserves "1MB of SRAM2" for network
+    activations and the shipped stm32n6.mpool declares cpuRAM2 = 1024 KB at
+    0x34100000, i.e. up to 0x34200000 - while ST's own FSBL linker script
+    (STM32N657XX_AXISRAM2_fsbl.ld) places the FSBL image at 0x34180400 and its
+    RAM at 0x341C0000-0x34200000, and the boot diagram draws the user app as
+    0x34000000-0x34180000. The compiler will allocate activations into the top
+    512 KB without comment. It never fires for ST's models: their AED model
+    uses cpuRAM2: 0 B.
+    """
+cause         = """
+    The documentation and the mpool agree with each other and disagree with
+    the FSBL's own layout by 512 KB (GATE4.md Round 7). Whether an overlap
+    matters at runtime is NOT established. The FSBL has copied the image,
+    set VTOR/MSP and jumped before the app's first inference, so the region is
+    plausibly dead by then. Consistent with that (inference, not a conclusion
+    the source draws): the --force-all-in-out-to-mem Citrinet build used
+    800 kB of cpuRAM2 (78.1 %) - if allocated from the pool base, as the
+    truncated graph's 0x34100000-0x34132000 was, it reaches ~0x341C8000 - and
+    ran from flash repeatably with output identical to the 448-epoch build.
+    Also note Round 7's claim that the 8 s model's "625 KB of activations"
+    crosses the line conflates the total with cpuRAM2: under --Oauto-sched
+    that build is 200 kB cpuRAM2 + 425 kB npuRAM6.
+    """
+workaround    = """
+    If you want to stay inside what ST's boot layout guarantees, check that the
+    cpuRAM2 range in network_generate_report.txt ends at or below 0x34180000 -
+    as a warning, not a failure, until an overlap is shown to break something,
+    since a working build exceeded it. --Oauto-sched cut cpuRAM2 on Citrinet
+    from 500 kB to 200 kB. AXISRAM3/4/5 are clocked by the audio app but
+    undeclared in the mpool; declaring them would widen the pools from
+    1,507,328 B to ~2,884,608 B (arithmetic, not compiled). Report the
+    doc/mpool mismatch upstream.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/compile/DECISION-oauto-sched.md", "/home/claroche/stm32n6-tts/firmware/WORKLIST.md"]
+
+[[issue]]
+id            = "dk-microphone-hot-at-stock-mdf-gain-clips"
+failure_class = "SILENT_INPUT_CLIPPING"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    SILENT: the DK's MP23DB01HP at the stock MDF gain peaks near -4 dBFS and a
+    louder talker clips - 62.5 % WER from a clean NPU run
+    """
+symptom       = """
+    At the BSP default MDF_GAIN(16000) = 2 one utterance measured -3.8 dBFS
+    peak, -23.5 dBFS RMS, 0 clipped samples. A louder or closer talker at the
+    same gain clipped 1067 of 128,000 samples (0.83 %) and scored 62.5 % WER,
+    the worst figure in the project; reproduced deliberately later (907
+    clipped, transcript garbled). 39 clipped samples (0.03 %) scored 0.0 %.
+    Every log reports a clean NPU run. The desk assumption - about -54 dBFS,
+    a gain deficit - was wrong by about 50 dB and of the opposite sign.
+    """
+cause         = """
+    The int16 stream sits at a fixed +48 dB relative to a straight 24->16-bit
+    alignment: MDF1's DFLTDR holds the 24-bit sample in bits [31:8]
+    (MDF_DFLTDR_DR_Pos = 8), the BSP's `/256` extracts it, and the following
+    SaturaLH(-32768, 32767) clips the top 8 bits - anything above -48 dBFS of
+    MDF full scale clips hard (register reasoning in AUDIO-INPUT.md, not a
+    direct measurement). The live `/256` is at
+    Patch/stm32n6570_discovery_audio.c:3234 and :3259; the copies at
+    :3172/:3197 are compiled out (USE_HAL_MDF_REGISTER_CALLBACKS = 0). The
+    DK's microphone is an MP23DB01HP (stm32n6570_discovery_audio.h:194), not
+    the IMP34DT05 named in ST's AED model config, which is unused metadata.
+    """
+workaround    = """
+    Control on clipping, not on level: on any clipped sample drop MDF_GAIN by
+    three steps (~3 dB each, range -16..+24) at once - a peak-targeting loop
+    alone escapes slowly because a clipped capture reads 0.0 dBFS and its
+    error saturates. Keep MDF acquiring continuously: HAL_MDF_SetGain() works
+    only in HAL_MDF_STATE_ACQUISITION. Do not widen `/256` to `/16` (removes
+    24 dB of headroom). Freeze adaptation when nothing decodes (an empty room
+    winds a level loop to a rail). Print clipped-sample counts every
+    utterance. Measured on canned audio: WER is flat at 6-8 % from -3.8 to
+    -30 dBFS peak and int16 truncation costs nothing measurable; SNR is the
+    variable (graceful to ~10 dB). BSP_AUDIO_IN_Record() caps the MDF
+    half-buffer at 320 samples (DEFAULT_AUDIO_IN_BUFFER_SIZE), and 8-bit
+    capture returns BSP_ERROR_FEATURE_NOT_SUPPORTED.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/FRONTEND.md", "/home/claroche/stm32n6-tts/firmware/AUDIO-INPUT.md", "/home/claroche/stm32n6-tts/README.md", "/home/claroche/stm32n6-tts/firmware/WORKLIST.md"]
 
 [[issue]]
 id            = "export-lint-under-approximates-compiler"
@@ -2337,6 +3829,123 @@ detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md"]
 
 [[issue]]
+id            = "npu-cycle-counter-dwt-dead-and-reset-in-aidpuprocess"
+failure_class = "SILENT_WRONG_CYCLE_COUNTER"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: on the N6 DWT->CYCCNT is not the cycle counter
+    (HAS_DWT_CTRL 0), and the PMU counter ST uses is reset inside
+    AiDPUProcess()
+    """
+symptom       = """
+    Two plausible, wrong latencies. (1) DWT->CYCCNT read around an invoke
+    printed 1,153,851,768 and 1,021,881,927 "cycles" - numbers that only
+    looked like measurements. (2) Timing an M55 front end and then the invoke
+    from the front end's end stamp reported the NPU at 1.7-1.9 M cycles while
+    the two stages summed to a suspiciously constant 83.45 M; the invoke was
+    in fact ~84 M cycles.
+    """
+cause         = """
+    `ai_device_adaptor.h:245` sets HAS_DWT_CTRL 0 for this part and maps
+    port_dwt_get_cycles() to ARM_PMU_Get_CCNTR(): the Cortex-M55 counts cycles
+    in the PMU. And ST's AiDPUProcess() (Projects/Dpu/ai_dpu.c:220) calls
+    port_dwt_reset() before stai_network_run(), so any stamp taken before it
+    is invalidated.
+    """
+workaround    = """
+    Use port_dwt_reset() / port_dwt_get_cycles() (Projects/Common/cpu_stats.h),
+    reset immediately before each timed stage, and print the raw reads
+    (`t0=0 t1=81535764 | n0=0 n1=84038343`). The tell for (2): two fixed-cost
+    stages whose split moves while their sum does not. Never derive a
+    per-epoch time from wall clock divided by a count, and keep UART prints
+    out of timed windows (see st-audio-app-uart-14400-baud).
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/firmware/FRONTEND.md", "/home/claroche/stm32n6-tts/firmware/WORKLIST.md", "/home/claroche/stm32n6-tts/firmware/vendor-mods/gate4.patch"]
+
+[[issue]]
+id            = "npu-idle-throughput-not-free-in-energy"
+failure_class = "ENERGY_TRACKS_MACS_NOT_LATENCY"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    SILENT: filling the NPU's idle throughput is nearly free in time but not in
+    energy - energy per inference tracks MACs, and a faster schedule is not a
+    cheaper one
+    """
+symptom       = """
+    N6Net, designed to fill unused NPU throughput, ran 130x the MACs of
+    blockdiag_full in 1.7x the time (12 ps/MAC vs 910 ps), but energy per MAC
+    fell only 4-7x (24-35 nJ -> 5-7 nJ): 15-95x the anchors' energy per
+    inference, +23-70 mW at a 16 ms hop against their +3-6 mW. The epoch
+    controller made b3 34% faster (2.447 -> 1.611 ms) but saved only 5.5%
+    energy (471 -> 445 uJ) while inference power rose from +192 to +276 mW; at
+    the fixed hop both cost the same (+56.0 vs +56.7 mW). v2_c96, at the
+    highest conv utilisation (233 ops/cycle, compiler figure), drew the most
+    power (+409 mW) for the same energy per MAC.
+    """
+cause         = """
+    An idle NPU draws almost nothing, so unused throughput was never being paid
+    for; filling it adds its full switching energy. Small graphs spend each
+    inference mostly on fixed overhead (epoch launches, memory traffic), which
+    is why their per-MAC cost is 3-7x higher.
+    """
+workaround    = """
+    Budget energy per MAC, not per millisecond: about 5-7 nJ/MAC for large
+    NPU-resident graphs and 21-35 nJ/MAC for small overhead-bound ones on this
+    board and harness (board power at 5 V, busy-loop idle baseline), then
+    measure. Do not justify extra MACs by idle NPU time, and do not expect a
+    latency optimisation (epoch controller, higher utilisation) to save energy
+    at a fixed frame rate.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_cells.csv"]
+
+[[issue]]
+id            = "ort-optimization-level-changes-int8-reference"
+failure_class = "HOST_REFERENCE_NOT_A_FIXED_POINT"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: onnxruntime's graph-optimisation level alone flips 7 of 100
+    int8 argmax frames, so per-frame equality with one ORT configuration is no
+    device verdict
+    """
+symptom       = """
+    On a canned Citrinet tensor the device disagreed with host ORT (default
+    optimisations) on 5 of 100 frames and failed an exact-match gate - while
+    ORT ENABLE_ALL against ORT DISABLE_ALL, same graph and input, disagree on
+    7. The optimisation level alone also changes a decoded transcript ("for
+    fortnight" vs "for a fortnight"). Over 64 utterances: 2.41 % per-frame
+    disagreement, 6.25x enriched in the tightest decile of host top1-top2
+    margin and zero in the widest 20 %; 70.8 % are blank shifts that CTC
+    collapses; 17 of 6,400 host frames (0.27 %) are exact argmax ties; paired
+    WER difference -0.118 points, bootstrap 95 % [-1.290, +1.144].
+    """
+cause         = """
+    Two int8 evaluations that differ only in fusion and rounding order
+    disagree near argmax ties. The device side is deterministic and
+    schedule-independent: a 1064-epoch and a 448-epoch build gave one distinct
+    100-token output across 23 captured runs.
+    """
+workaround    = """
+    Pin and record ORT's graph_optimization_level for every host reference.
+    Gate on corpus-level decoded output with a paired interval stated with its
+    n, not on per-frame argmax equality on one input, and report host-vs-host
+    variation next to device-vs-host: a device gap inside the ORT-vs-ORT gap is
+    not evidence of a defect.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/model/README.md", "/home/claroche/stm32n6-tts/README.md"]
+
+[[issue]]
 id            = "power-via-stock-validate-measures-uart-energy"
 failure_class = "SILENT_TRANSPORT_DOMINATED_MEASUREMENT"
 stage         = "validate"
@@ -2367,6 +3976,38 @@ silent        = true
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
+
+[[issue]]
+id            = "realtime-power-exceeds-energy-times-rate"
+failure_class = "DUTY_CYCLE_PEDESTAL_UNPRICED"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    SILENT: per-inference energy x frame rate under-predicts the real-time added
+    power - about 2x for N6Net, up to 6.7x for small graphs
+    """
+symptom       = """
+    The saturated-loop energy per inference looks like the number to multiply
+    by the frame rate, but the duty-cycled real-time phase measures more: b3
+    445 uJ x 62.5 fps = 27.8 mW predicted, 56.7 mW measured. Ratio of
+    real-time to predicted from the published table: monarch_20 6.7x,
+    blockdiag_full 5.0x, ConvFSENet 3.4x, LiSenNet streaming 1.5x; the
+    campaign's duty_over_sat column spans 1.19 (v2 C128) to 6.78 (monarch_20).
+    """
+cause         = """
+    A pedestal from duty-cycling the NPU, which nsnet_dse measured and traced
+    to the board, not the network (per N6NET_POWER.md; that evidence is not in
+    these repos). It weighs more when the network itself costs less.
+    """
+workaround    = """
+    Measure a real-time phase (one inference per hop, idle in between) and
+    quote its added mW as the product figure; report saturated uJ/inference
+    only as a per-inference quantity, never multiplied up to product power.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_cells.csv", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/pass1/n6net_b3__n6-noextmem-ec/analyze.txt"]
 
 [[issue]]
 id            = "serial-fed-states-zero-point-anomaly"
@@ -2442,6 +4083,125 @@ detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md"]
 
 [[issue]]
+id            = "st-audio-app-uart-14400-baud"
+failure_class = "SLOW_DEBUG_UART_DISTORTS_TIMING"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: ST's audio app runs its VCP at 14400 baud because 921600
+    breaks UART_Config at its clocks - ~0.7 ms per character inside any timed
+    region
+    """
+symptom       = """
+    (1) With a wait on USART_ISR_TC each character costs ~694 us; an epoch
+    callback that printed 18 characters after taking its timestamp produced a
+    "uniform 12.6 ms per-epoch penalty, +/-1 % across seventeen epochs" that
+    was published as a hardware timeout (18 x 694 us = 12.5 ms). (2) Per-epoch
+    tracing costs ~14 ms/epoch, ~9 s over a 628-epoch graph. (3) Bulk data is
+    impractical: a 256,000 B utterance is ~178 s at 1,440 B/s, and a base64
+    PCM dump took ~12 minutes because my_printf emits an ANSI reset per call
+    (3.05x the payload). The app has no UART receive path at all.
+    """
+cause         = """
+    The baud is set in Projects/GS/Inc/app_config.h, which records a measured
+    attempt: 921600 breaks UART_Config at this clock (the UART has to hold
+    across the DVFS clock changes the app makes), so both branches stay at
+    14400. ST's NPU_Validation firmware, which other atlas entries use, runs
+    921600.
+    """
+workaround    = """
+    Read the app's VCP at 14400 8N1. Put UART output outside timed windows
+    (print before taking the timestamp, or after computing the delta); keep
+    epoch tracing opt-in and windowed; move bulk data through memory-mapped
+    external flash blobs (0x71000000, 0x72000000 worked) rather than the VCP.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/BUILD.md", "/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/firmware/AUDIO-INPUT.md", "/home/claroche/stm32n6-tts/firmware/FRONTEND.md"]
+
+[[issue]]
+id            = "st-audio-preprocessing-library-cannot-express-nemo-logmel"
+failure_class = "VENDOR_FRONTEND_SEMANTICS_MISMATCH"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    SILENT: ST's STM32_AI_AudioPreprocessing_Library clamps the log at FLT_MIN
+    and its float16 path takes logf(0) = -inf - 96 % of a NeMo log-mel moves
+    """
+symptom       = """
+    Replacing NeMo's ln(x + 2^-24) with ST's `if (x <= 0) x = FLT_MIN;
+    logf(x);` and changing nothing else moves 737,335 of 768,000 int8 features
+    (96.01 %), max |d| 46 LSB, log floor -16.64 -> -87.34. On the float16 path
+    FLT_MIN assigned into a float16_t underflows to exactly 0 and the next line
+    takes logf(0) = -inf, on 3,098-37,721 of 64,000 mel bins per utterance of
+    ordinary speech. Nothing errors.
+    """
+cause         = """
+    LogMelSpectrogramColumn_q15_Q8() (feature_extraction.c:250-324) clamps
+    instead of adding a guard (:293-298, :315-317), has no per-mel-bin
+    normalisation, and quantises inline per column (:320-323), before the
+    statistics a per-feature z-score needs exist; Window_Init() builds a
+    periodic Hann (window.c:78). The audio app is wired to float16
+    (app_config.h:51; audio_bm.h:28-33 #error if changed), and 2^-24 is
+    exactly float16's smallest subnormal.
+    """
+workaround    = """
+    Write the front end: float32, two passes (per-column log-mel into a
+    scratch buffer, then per-bin mean and std(ddof=1) and quantise), tested
+    bit-exact against the model's own Python front end - stm32n6-stt's
+    citrinet_fe.c matched 0 of 768,000 on the host and 6 of 960,000 at 1 LSB
+    on silicon. Keep float32 scratch unless the cost is priced (float16
+    scratch: 3,982 of 768,000 off by 1 LSB), accumulate variance in double
+    (float32 sum/sumsq: 236 of 768,000), use rintf (round-half-even) not
+    roundf. Budget it: 136.0 ms on the M55 for an 8 s window, as much as the
+    whole NPU encoder.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/FRONTEND.md", "/home/claroche/stm32n6-tts/docs/GATES-5-6.md", "/home/claroche/stm32n6-tts/firmware/AUDIO-INPUT.md"]
+
+[[issue]]
+id            = "stai-layer-discards-epoch-callback"
+failure_class = "INSTRUMENTATION_HOOK_DISCARDED"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    INFRA, SILENT: a per-epoch callback set with
+    LL_ATON_RT_SetNetworkCallback() never fires through the stai API - the
+    stai layer overwrites it on every run
+    """
+symptom       = """
+    Instrumenting an NPU hang with the documented epoch callback traces
+    nothing: the registered callback is never called and nothing reports an
+    error. Seen with ST Edge AI Core 4.0.1's middleware (ll_aton 1.1.3-275)
+    inside STM32N6-GettingStarted-Audio.
+    """
+cause         = """
+    `__ll_aton_stai_run()` (ll_aton_stai_internal.c:417-425) re-sets the
+    network callback on every run: if `nn_context->callback != NULL` it
+    installs `_stai_aton_internal_epoch_block_callback`, otherwise NULL -
+    discarding whatever the user registered. `_stai_aton_context.callback` is
+    never assigned anywhere in the middleware, and there is no public
+    per-network setter (stai_runtime_set_callback() feeds a different,
+    runtime-wide hook).
+    """
+workaround    = """
+    Write `_stai_aton_context.callback` (and `callback_cookie`) directly - the
+    `stai_network *` handle is that context - and stai installs its own
+    forwarder, which calls yours. With LL_ATON_EB_DBG_INFO defined each
+    epoch-block item carries epoch_num, the in/out streaming-engine masks and
+    estimated cycles; print those, not a software counter (see the amendment
+    to sw-dequantizelinear-epoch-hang). Use raw USART writes in the callback:
+    it may run in ISR context.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/firmware/vendor-mods/gate4.patch"]
+
+[[issue]]
 id            = "untrained-or-wrong-checkpoint-measured"
 failure_class = "SILENT_WRONG_WEIGHTS_PROVENANCE"
 stage         = "fetch"
@@ -2460,20 +4220,32 @@ symptom       = """
     checkpoint; the nblocks-20 point uses an UNTRAINED random-weight checkpoint.
     """
 cause         = """
-    Latency and epoch count are weight-independent, so nothing in the toolchain
-    flags the substitution. Checkpoints never published from the training box,
-    and synthetic/untrained rungs added to sweep a structural parameter, sit in
-    the same `cp_*/g_best` layout as trained ones.
+    Latency and epoch count are MOSTLY weight-independent, so nothing in the
+    toolchain flags the substitution. Checkpoints never published from the
+    training box, and synthetic/untrained rungs added to sweep a structural
+    parameter, sit in the same `cp_*/g_best` layout as trained ones. Two
+    exceptions: an all-zero parameter (a zero-initialised positional
+    embedding feeding an Add) is folded away by the toolchain, so an
+    untrained compile can be structurally different from the trained graph;
+    and quantization ranges, which follow the weights, move epoch splits
+    (see calibration-set-size-changes-compiled-latency) and the allocator's
+    spill split - the RF-196 windowed `deep` (re-initialised) and
+    `relu6-deep` (trained) graphs, same topology, measured 5.72 vs 3.09
+    ms/frame while their streaming graphs agree within 1%.
     """
 workaround    = """
     Record checkpoint provenance (and a weight hash / host FP32 metric)
-    alongside every board measurement, and mark rows whose weights are not the
-    trained artifact. Quote latency from such rows ONLY - never accuracy/PESQ.
+    alongside every board measurement, and mark rows whose weights are not
+    the trained artifact. Quote latency from such rows ONLY - never
+    accuracy/PESQ - and only for graphs that stay on-chip. Before a
+    compile-only study, initialise every parameter that could be all-zero
+    with small random values, and re-measure on the trained artifact before
+    publishing.
     """
 silent        = true
 is_infra      = false
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md", "/home/claroche/eco8-neaixt/n6net/model_v2.py", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_COMPILE.md"]
 
 [[issue]]
 id            = "validate-vs-profiler-latency-offset"
@@ -2481,29 +4253,76 @@ failure_class = "SILENT_CROSS_METHOD_LATENCY_BIAS"
 stage         = "validate"
 zoo_action    = "document-only"
 title         = """
-    INFRA, SILENT: validate and npu_profiler latencies are not interchangeable
-    (~1 ms offset)
+    INFRA, SILENT: label every latency with its method - but the claimed ~1 ms
+    validate-vs-npu_profiler offset is not reproduced on same-graph pairs
     """
 symptom       = """
-    Both tools succeed and report per-inference latency; mixing them in one
-    table silently biases rows measured by `validate` upward by roughly 1 ms
-    relative to `npu_profiler`'s pure-inference figure. This actually happened:
-    a native-dilation experiment was compared at 5.42 ms (validate) against a
-    4.40 ms baseline (profiler).
+    The repo's notes say `validate`'s `duration ... by sample` runs ~1 ms
+    above `npu_profiler`, and a native-dilation result (5.42 ms, validate)
+    was compared with a 4.40 ms profiler baseline on that basis - but those
+    are two different graphs. Where the same graph was measured both ways the
+    methods agree to 0.1 ms or better: LiSenNet streaming 2.79 vs 2.784 ms,
+    the nc20-shaped streaming graph 2.599 vs 2.598 ms; and the power
+    firmware's own cycle-count timing matched validate within 3.2% on all
+    22 N6Net campaign runs.
     """
 cause         = """
-    `validate`'s `duration ... by sample` includes host/protocol overhead that
-    the profiler's pure-inference measurement excludes. A host
-    measurement-method property, not a model property.
+    Unverified. Inference: the profiler prints per-epoch times and a wall
+    total, and its per-epoch sums exclude 0.5-1.0 ms of inter-epoch overhead
+    (ensemble_sweep README); a figure taken from per-epoch sums rather than
+    the total would read low by about the claimed offset.
     """
 workaround    = """
-    Record the measurement METHOD with every latency number and only compare
-    like-for-like.
+    Record the measurement method with every latency number, compare
+    like-for-like, and take the profiler's wall total, never its per-epoch
+    sum, as latency. Do not apply a ~1 ms correction; measure both methods on
+    the same graph if a cross-method comparison is unavoidable.
     """
 silent        = true
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md"]
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/TODO.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/results/n6net_power/power/campaign_runs.csv"]
+
+[[issue]]
+id            = "xspi-reads-before-invoke-cost-13-percent"
+failure_class = "SILENT_INPUT_PATH_LATENCY"
+stage         = "runtime"
+zoo_action    = "document-only"
+title         = """
+    SILENT: the same graph measures 124.0 ms with its input already in RAM and
+    140.0 ms when the CPU has just read from memory-mapped external flash
+    """
+symptom       = """
+    Citrinet-256, identical graph, weights and input size: 74,421,588 cycles
+    (124.035 ms) per invoke on a canned tensor in RAM, against 83,997,678
+    cycles median (140.0 ms, +13 %) when the harness memcpy's the 64,000 B
+    input from memory-mapped xSPI2 flash immediately before each invoke. The
+    waveform-replay build (M55 front end reading 256,000 B of PCM from flash)
+    measured 140.1 ms, and the shipped microphone + LCD build's status line
+    also reads `npu 140ms`. The compiler's estimate (76,000,592 cycles) matches
+    only the 124 ms figure.
+    """
+cause         = """
+    Untested. stm32n6-stt's hypothesis: CPU reads through xSPI2 evict weights
+    the NPU would otherwise find cached, so the invoke re-fetches them. That
+    the live-microphone build, whose input arrives in AXISRAM, also reads
+    140 ms argues against a flash-read-only explanation (inference): something
+    else on that path may have the same effect. Related fact: ST's
+    Ext_Mem_Config() disables XSPI2 automatic prefetch ("Hotfix for xspi: no
+    prefetch"), so memory-mapped CPU reads pay full per-transaction latency.
+    """
+workaround    = """
+    Quote on-target latency from the deployment's real input path, not from a
+    canned tensor in RAM, and record which it was; budget the 13 % until it is
+    explained. When an M55 stage reads memory-mapped flash, measure it with
+    the input in RAM and in flash and report the delta. Re-enabling XSPI2
+    prefetch (stm32n6-stt's -DGATE4_XSPI_PREFETCH) has not been tried against
+    this effect.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE4.md", "/home/claroche/stm32n6-tts/README.md", "/home/claroche/stm32n6-tts/firmware/FRONTEND.md", "/home/claroche/stm32n6-tts/firmware/AUDIO-INPUT.md", "/home/claroche/stm32n6-tts/board/BUILD.md"]
 
 [[issue]]
 id            = "ai-runner-numpy2-and-serial-timeout"
@@ -2635,6 +4454,36 @@ detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/POWER_MEASUREMENT_20260810.md"]
 
 [[issue]]
+id            = "fnb58-stops-after-init-read-gap"
+failure_class = "POWER_METER_PROTOCOL_STALL"
+stage         = "board"
+zoo_action    = "document-only"
+title         = """
+    INFRA: the FNB58 power meter stops accepting commands if the client leaves a
+    few seconds between its init and its first read
+    """
+symptom       = """
+    The meter stops answering commands and, when the kernel resets it, drops
+    off the bus.
+    """
+cause         = """
+    Meter-side behaviour after init; not diagnosed further in the source.
+    """
+workaround    = """
+    Use a client that reads immediately after init (nsnet_dse's
+    `fnb58_hidraw.py`, which never leaves a gap). The 2026-09-17 campaign
+    drove the meter this way from the Linux side, with the rig of nsnet_dse's
+    power_harness/README-LINUX.md (FNB58 inline on CN8, JP2 = 5V_USB_SNK,
+    debug on CN6), which suggests the Windows-only workaround in
+    fnb58-interrupt-out-fails-over-usbip may be superseded - not verifiable
+    from these repos.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/N6NET_POWER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/power/run_campaign.sh"]
+
+[[issue]]
 id            = "gcc-path-hardcoded-windows-error-127"
 failure_class = "HOST_TOOLCHAIN_PATH_ERROR"
 stage         = "board"
@@ -2720,38 +4569,6 @@ silent        = false
 is_infra      = false
 detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
-
-[[issue]]
-id            = "ll-aton-middleware-version-mismatch"
-failure_class = "STALE_RUNTIME_MIDDLEWARE"
-stage         = "board"
-zoo_action    = "document-only"
-title         = """
-    INFRA: the app's bundled ll_aton middleware is version-locked to the
-    stedgeai that generated network.c
-    """
-error_signature = "Possible mismatch in ll_aton library used"
-symptom       = """
-    `make build` warns \"Possible mismatch in ll_aton library used\" when the
-    app's bundled NPU middleware version does not match the ST Edge AI Core
-    version that generated network.c.
-    """
-cause         = """
-    `STM32N6-GettingStarted-Audio` ships an `ll_aton` locked to stedgeai 4.0.0
-    while the generator installed here is 4.0.1; generator and runtime must
-    agree. In practice 4.0.x was accepted and the source heads the section
-    'largely resolved'.
-    """
-workaround    = """
-    Keep generator and app on the same major/minor (4.0.x was accepted here), or
-    refresh the app's `ll_aton` per ST's \"update project with a new version of
-    ST Edge AI Core\" procedure, or check out an app tag built with the matching
-    version.
-    """
-silent        = false
-is_infra      = true
-detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/README.md"]
 
 [[issue]]
 id            = "per-channel-int32-bias-adjustment-trips"
@@ -2845,6 +4662,52 @@ silent        = false
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
+
+[[issue]]
+id            = "validate-fails-on-some-multi-io-streaming-graphs"
+failure_class = "HOST_TOOL_INCOMPATIBILITY"
+stage         = "validate"
+zoo_action    = "document-only"
+title         = """
+    stedgeai validate cannot measure some multi-I/O streaming graphs that
+    compile and that npu_profiler can run
+    """
+error_signature = "INTERNAL ERROR: 'NoneType' object is not subscriptable"
+symptom       = """
+    On ensemble-fold graphs (18 inputs / 18 outputs) `validate --mode target`
+    crashed host-side in the import pass with `INTERNAL ERROR: 'NoneType'
+    object is not subscriptable`. On K-branch graphs (35 in / 36 out) both
+    validate and npu_profiler failed at runtime bind with E801 Invalid firmware
+    - the validation app rejected the I/O table. npu_profiler bound the 18/18
+    folds fine but hung at `-b 16` (telemetry volume); `-b 1` and `-b 4`
+    worked.
+    """
+cause         = """
+    Not diagnosed. The E801 case is put down to the size of the I/O table, with
+    an unknown threshold: the handover's ">~20-IO" is too low, because 26-input
+    LiSenNet streaming graphs validated normally (r6str 4.825 ms, deepstr 4.877
+    ms). The NoneType crash is not an I/O-count effect: the same 18/18 graphs
+    bound in npu_profiler, and 18-input baselines validate.
+    """
+workaround    = """
+    Measure such graphs with npu_profiler at `-b 1` / `-b 4` (the baseline gave
+    2.598 ms at both b=1 and b=16), and size an I/O problem on a K=1 twin
+    first. An E801 at bind with stock firmware and a passing control graph
+    points at the I/O table, not the board; the regex fallback in classify()
+    files any E801 under LOAD_FAILED (infra), so do not let it be discarded as
+    a board fault.
+    """
+silent        = false
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ensemble_sweep/README.md", "/home/claroche/eco8-neaixt/ENSEMBLE_STUDY_HANDOVER.md", "/home/claroche/eco8-neaixt/paper/data/board_results.csv", "/home/claroche/eco8-neaixt/paper/data/compile_facts.json"]
+
+
+# ###########################################################################
+# AMENDMENTS. Each replaces only the fields listed under [amend.issue];
+# `sources` lists the full new array (old sources first).
+# ###########################################################################
+
 
 [[issue]]
 id            = "validate-refuses-unfused-gemm-graph"

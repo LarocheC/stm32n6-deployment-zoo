@@ -31,14 +31,33 @@ max_sw_ops = 40
 
 [budget]
 # Usable on-chip pool for the SCREENING harness mpool: cpuRAM2 (1024 KB) plus
-# npuRAM3-6 (4 x 448 KB). The compiler reports the virtual pool at 2,883,576 B.
+# npuRAM3-6 (4 x 448 KB) = 2,883,584 B of declared bank. The compiler reserves
+# 8 B per allocatable pool (`alignment: 8`), so `network.c`'s pool table reports
+# the merged virtual pool as 2,883,576 and that is the number to budget against.
+# Beware: `network_c_info.json` - which is what zoo/st/cinfo.py parses - reports
+# `size_bytes: 2883584` for the SAME pool, so a check that compares a parsed
+# pool size against this constant is off by 8 and should compare fractions or
+# allow the slack. (Same 8 B on every non-zero pool of a non-virtual mpool too;
+# seen in six zoo compiles and stm32n6-stt's Citrinet compile.)
 onchip_bytes = 2883576
 hyperram_bytes = 33554432      # 32 MB HexaSPI PSRAM
 octoflash_bytes = 117440512    # 112 MB OctoSPI NOR, read-only
 
 # The demo-tier applications reserve memory for themselves, so a model that
 # screens fine can still be too big to promote. Checked at promotion time.
-audio_app_onchip_bytes = 1507328    # 1472 KB: AXISRAM2 + AXISRAM6 only
+# 1472 KB = cpuRAM2 (1024 KB) + npuRAM6 (448 KB), the only two non-zero internal
+# pools in ST's Projects/X-CUBE-AI/models/stm32n6.mpool (8 B reservation each, so
+# 1,507,312 usable). Two cautions, both from stm32n6-stt:
+#   - the same mpool offers 16 MB of hyperRAM, so this is a target the compiler
+#     will silently exceed by spilling, not a ceiling it enforces (atlas:
+#     psram-spill-with-zero-sw-epochs);
+#   - it is ST's conservative default, NOT a hardware ceiling: audio_bm.c's
+#     Int_Mem_Config() powers and clocks AXISRAM3/4/5 too and nothing claims
+#     them (the app's only linker region is AXISRAM1), so declaring them in the
+#     mpool widens this to 2,883,584 B. Before relying on that, check whether the
+#     wider pool gives a BETTER schedule or merely a legal one (bank allocation
+#     affects NPU port contention), and whether the final app wants those banks.
+audio_app_onchip_bytes = 1507328
 vision_app_onchip_bytes = 2883576   # framebuffers live in PSRAM
 
 # Peak activation is the cliff, not the slope. Any external spill costs 5-20x
@@ -59,6 +78,12 @@ activation_type = "QInt8"
 weight_type = "QInt8"
 per_channel = true
 calibrate_method = "MinMax"
+# ORT's default is asymmetric activations. Symmetric activations force every
+# zero-point to 0, which is what lets a deployment contract read "offset 0" and
+# lets a hand-written front end quantise with q = round(x/scale) and no offset
+# term. A recipe that depends on that says so in its own [quantize] table.
+activation_symmetric = false
+weight_symmetric = true
 calibration_samples = 128
 calibration_seed = 0
 

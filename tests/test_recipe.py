@@ -153,3 +153,11 @@ skip_reason = "single top-level If wrapping a growing KV cache"
     r = recipe.load(_write(tmp_path, text))
     assert [g.id for g in r.graphs] == ["main", "decoder"]
     assert [g.id for g in r.enabled_graphs] == ["main"]
+
+
+def test_quantize_overrides_load_and_typos_are_refused(tmp_path: Path) -> None:
+    r = recipe.load(_write(tmp_path, MINIMAL + "\n[quantize]\nactivation_symmetric = true\n"))
+    assert r.quantize == {"activation_symmetric": True}
+    assert recipe.load(_write(tmp_path, MINIMAL)).quantize == {}
+    with pytest.raises(recipe.RecipeError, match="activation_symetric"):
+        recipe.load(_write(tmp_path, MINIMAL + "\n[quantize]\nactivation_symetric = true\n"))

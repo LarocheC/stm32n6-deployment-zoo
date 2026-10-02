@@ -44,6 +44,11 @@ TIERS = (1, 2, 3)  # 1 = screen only, 2 = measure on board, 3 = firmware demo
 ANONYMOUS_AXIS = "?"
 
 
+#: The policy `[quantize]` keys a recipe may override. A typo must fail loudly:
+#: a silently ignored `activation_symetric = true` would ship the wrong scheme.
+QUANTIZE_OVERRIDES = ("activation_symmetric", "weight_symmetric")
+
+
 class RecipeError(ValueError):
     """A recipe is malformed. Always names the file and the offending key."""
 
@@ -229,6 +234,9 @@ class Recipe:
     graphs: list[GraphSpec] = field(default_factory=list)
     variants: Variants = field(default_factory=Variants)
     calibration: Calibration = field(default_factory=Calibration)
+    #: Per-model overrides of policy `[quantize]`. Only the keys in
+    #: QUANTIZE_OVERRIDES: a property of the model, not of the bench.
+    quantize: dict[str, Any] = field(default_factory=dict)
     schema: int = SCHEMA_VERSION
 
     def validate(self) -> None:
@@ -246,6 +254,11 @@ class Recipe:
             raise RecipeError(f"{where}: duplicate graph ids in {ids}")
         for graph in self.graphs:
             graph.validate(where)
+        unknown = sorted(set(self.quantize) - set(QUANTIZE_OVERRIDES))
+        if unknown:
+            raise RecipeError(
+                f"{where}: [quantize] keys {unknown} not in {list(QUANTIZE_OVERRIDES)}"
+            )
 
     @property
     def enabled_graphs(self) -> list[GraphSpec]:
@@ -328,6 +341,7 @@ def load(path: Path) -> Recipe:
             seed=int(cdoc.get("seed", 0)),
             options=dict(cdoc.get("options", {})),
         ),
+        quantize=dict(doc.get("quantize", {})),
         schema=int(doc.get("schema", SCHEMA_VERSION)),
     )
     recipe.validate()

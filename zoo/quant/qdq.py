@@ -75,6 +75,8 @@ class QuantResult:
     #: ST's scheme is per-channel symmetric weights. False means a documented
     #: fallback was taken and accuracy is expected to be worse.
     per_channel: bool = True
+    #: True when every activation zero-point was forced to 0.
+    activation_symmetric: bool = False
     upgraded_opset_from: int | None = None
     notes: list[str] = field(default_factory=list)
 
@@ -102,6 +104,7 @@ class QuantResult:
             "quantize_ops": self.op_counts.get("QuantizeLinear", 0),
             "audit_failures": self.audit_failures,
             "per_channel": self.per_channel,
+            "activation_symmetric": self.activation_symmetric,
             "upgraded_opset_from": self.upgraded_opset_from,
             "quant_notes": self.notes,
         }
@@ -290,8 +293,16 @@ def quantize(
     roles: dict[str, str] | None = None,
     exclude_rule: str | None = None,
     per_channel: bool = True,
+    activation_symmetric: bool = False,
+    weight_symmetric: bool = True,
 ) -> QuantResult:
-    """Static QDQ int8, to ST's scheme, with the audit run afterwards."""
+    """Static QDQ int8, to ST's scheme, with the audit run afterwards.
+
+    Symmetry comes from policy `[quantize]`, overridable per recipe. ORT's
+    asymmetric activations are the default; symmetric ones force every
+    zero-point to 0, which a hand-written front end quantising with
+    `q = round(x / scale)` and no offset term depends on.
+    """
     from onnxruntime.quantization import (
         CalibrationMethod,
         QuantFormat,
@@ -304,6 +315,7 @@ def quantize(
         calibration_provider=calibration.provider,
         calibration_source=calibration.source or "",
         calibration_preprocessor=calibration.preprocessor or "",
+        activation_symmetric=activation_symmetric,
     )
 
     fp32 = onnx.load(str(fp32_path))
@@ -383,7 +395,10 @@ def quantize(
             per_channel=per_ch,
             calibrate_method=CalibrationMethod.MinMax,
             nodes_to_exclude=exclude,
-            extra_options={"ActivationSymmetric": False, "WeightSymmetric": True},
+            extra_options={
+                "ActivationSymmetric": activation_symmetric,
+                "WeightSymmetric": weight_symmetric,
+            },
         )
 
     try:

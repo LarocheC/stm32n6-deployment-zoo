@@ -136,6 +136,32 @@ def test_a_sample_rate_mismatch_is_refused_rather_than_resampled(tmp_path):
         list(calib.get_provider("audio_folder").batches(specs, spec))
 
 
+def test_nemo_front_end_standardises_each_mel_bin_over_time(tmp_path):
+    """Citrinet was trained on per-bin standardised log-mel, not on raw log-mel."""
+    root = _write_wavs(tmp_path / "audio", seconds=9.0)
+    spec = calib.CalibrationSpec(
+        provider="audio_folder", n=1, seed=0, source=str(root),
+        preprocessor="log_mel_nemo", options={"lead_silence_samples": 4800},
+    )
+    specs = [calib.InputSpec(name="audio_signal", shape=[1, 80, 800])]
+    value = next(iter(calib.get_provider("audio_folder").batches(specs, spec)))["audio_signal"]
+
+    assert value.shape == (1, 80, 800) and value.dtype == np.float32
+    assert np.allclose(value[0].mean(axis=1), 0.0, atol=1e-3)
+    assert np.allclose(value[0].std(axis=1, ddof=1), 1.0, atol=1e-3)
+
+
+def test_nemo_window_is_centred_and_the_lead_in_comes_out_of_it():
+    """center=True: T frames are (T - 1) * hop + 1 samples, lead-in included."""
+    front = calib.get_preprocessor("log_mel_nemo")
+    plain = calib.CalibrationSpec(provider="audio_folder")
+    assert front.samples_needed([1, 80, 800], plain) == 799 * 160 + 1
+    lead = calib.CalibrationSpec(provider="audio_folder", options={"lead_silence_samples": 4800})
+    assert front.samples_needed([1, 80, 800], lead) == 799 * 160 + 1 - 4800
+    with pytest.raises(ValueError, match="no room"):
+        front.samples_needed([1, 80, 10], lead)
+
+
 # ---------------------------------------------------------------------------
 
 

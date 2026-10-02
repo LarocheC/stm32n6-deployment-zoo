@@ -440,6 +440,70 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_issue(issue, *, full: bool) -> None:  # noqa: ANN001
+    import textwrap
+
+    flags = [issue.zoo_action, issue.stage] + (["SILENT"] if issue.silent else [])
+    print(f"\n  {issue.id}  [{' · '.join(f for f in flags if f)}]")
+    wrap = textwrap.TextWrapper(width=96, initial_indent="      ", subsequent_indent="      ")
+    print(wrap.fill(issue.title))
+    fields = (("symptom", issue.symptom), ("cause", issue.cause)) if full else ()
+    for label, text in (*fields, ("fix", issue.workaround)):
+        if text:
+            print(wrap.fill(f"{label}: {text}"))
+    if full:
+        if issue.error_signature:
+            print(f"      signature: {issue.error_signature!r}")
+        for src in issue.sources:
+            print(f"      source: {src}")
+
+
+def cmd_atlas(args: argparse.Namespace) -> int:
+    from collections import Counter
+
+    from zoo.faults import signatures as sigs
+
+    issues = sigs.known_issues()
+    if args.classify:
+        text = sys.stdin.read() if args.classify == "-" else Path(args.classify).read_text(
+            errors="replace"
+        )
+        result = sigs.classify(text)
+        match = next((i for i in issues if i.id == result.known_issue), None)
+        print(f"\n  class: {result.failure_class}   infra: {result.is_infra}")
+        if match is None:
+            print("  no catalogue entry matches — a candidate for the atlas\n")
+            return 1
+        _print_issue(match, full=True)
+        print()
+        return 0
+
+    if args.id:
+        match = next((i for i in issues if i.id == args.id), None)
+        if match is None:
+            print(f"\n  no entry {args.id!r}\n", file=sys.stderr)
+            return 1
+        _print_issue(match, full=True)
+        print()
+        return 0
+
+    if not args.terms and not args.silent and not args.action:
+        by_action = Counter(i.zoo_action for i in issues)
+        print(f"\n  failure atlas — {len(issues)} constraints, "
+              f"{sum(i.silent for i in issues)} silent, "
+              f"{sum(bool(i.error_signature) for i in issues)} with a verbatim signature")
+        for action, n in by_action.items():
+            print(f"    {action:<22} {n:>3}")
+        print("\n  zoo atlas <words>   search · --id <id> · --classify <log|->\n")
+        return 0
+
+    found = sigs.search_catalogue(args.terms, silent_only=args.silent, action=args.action)
+    for issue in found:
+        _print_issue(issue, full=args.full)
+    print(f"\n  {len(found)} of {len(issues)} entries\n")
+    return 0 if found else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zoo",
@@ -530,6 +594,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_report.set_defaults(func=cmd_report)
 
+    p_atlas = sub.add_parser(
+        "atlas", help="search the failure atlas, or classify a log against it (no toolchain)"
+    )
+    p_atlas.add_argument("terms", nargs="*", help="words that must all appear in an entry")
+    p_atlas.add_argument("--id", help="print one entry in full")
+    p_atlas.add_argument("--classify", metavar="LOG",
+                         help="match a log file (or - for stdin) against the signatures")
+    p_atlas.add_argument("--silent", action="store_true", help="only silent failures")
+    p_atlas.add_argument("--action", help="only one section, e.g. board-invariant")
+    p_atlas.add_argument("--full", action="store_true", help="include symptom, cause, sources")
+    p_atlas.set_defaults(func=cmd_atlas)
+
     return parser
 
 
@@ -543,6 +619,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
+    except BrokenPipeError:
+        # `zoo atlas stall | head`: the reader left; that is not an error.
+        import os
+
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
 
 
 if __name__ == "__main__":

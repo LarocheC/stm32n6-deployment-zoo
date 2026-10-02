@@ -385,6 +385,102 @@ class WhisperLogMel:
         return log_spec[:, :frames].reshape(shape)
 
 
+# Citrinet's front end (stm32n6-stt). Checked bit-identical (max |diff| 0.0 on
+# an 80x800 block) against that repo's `model/fe.py`, the reference its C front
+# end is written against. Two constants are not interchangeable with a
+# neighbour: the `2**-24` log floor (`1e-2` takes dev-clean WER from 5.83 % to
+# 30.80 % on the same graph), and per-mel-bin standardisation over time with
+# ddof=1, without which every activation range is calibrated on a distribution
+# the board never produces.
+@register_preprocessor("log_mel_nemo")
+class NeMoLogMel:
+    """NVIDIA NeMo's `AudioToMelSpectrogramPreprocessor`, as Citrinet uses it.
+
+    `options` this preprocessor reads, all optional:
+
+        lead_silence_samples   zeros prepended before the utterance, so a clip
+                               starts where the evaluation harness starts it
+                               (4800 = 300 ms for stm32n6-stt). The window is
+                               still `(frames - 1) * hop + 1` samples total,
+                               so this trades real audio for leading silence
+                               rather than lengthening the buffer.
+        preemphasis            default 0.97; `0` disables it.
+        log_guard              default 2**-24. Do not raise it.
+    """
+
+    sample_rate = 16_000
+    n_fft = 512
+    win_length = 400
+    hop = 160
+    fmin = 0.0
+    fmax = 8000.0
+    std_eps = 1e-5
+
+    def _frames(self, shape: list[int]) -> tuple[int, int]:
+        if len(shape) < 2:
+            raise ValueError(f"log_mel_nemo needs a (…, mels, frames) input; got {shape}")
+        return int(shape[-2]), int(shape[-1])
+
+    def samples_needed(self, shape: list[int], spec: CalibrationSpec) -> int:
+        _, frames = self._frames(shape)
+        lead = int(spec.opt("lead_silence_samples", 0))
+        window = (frames - 1) * self.hop + 1
+        if lead >= window:
+            raise ValueError(
+                f"lead_silence_samples={lead} leaves no room in a {window}-sample window"
+            )
+        return window - lead
+
+    def __call__(self, audio: np.ndarray, shape: list[int], spec: CalibrationSpec) -> np.ndarray:
+        import librosa
+        import scipy.signal
+
+        mels, frames = self._frames(shape)
+        lead = int(spec.opt("lead_silence_samples", 0))
+        preemph = float(spec.opt("preemphasis", 0.97))
+        guard = float(spec.opt("log_guard", 2.0**-24))
+
+        window_samples = (frames - 1) * self.hop + 1
+        buffer = np.zeros(window_samples, dtype=np.float32)
+        take = min(len(audio), window_samples - lead)
+        buffer[lead : lead + take] = np.asarray(audio, dtype=np.float32)[:take]
+
+        # Pre-emphasis, NeMo's form: sample 0 passes through untouched.
+        if preemph:
+            buffer = np.concatenate([buffer[:1], buffer[1:] - preemph * buffer[:-1]])
+
+        # Symmetric Hann (`fftbins=False`), not the periodic default.
+        taper = scipy.signal.get_window("hann", self.win_length, fftbins=False)
+        stft = librosa.stft(
+            buffer,
+            n_fft=self.n_fft,
+            hop_length=self.hop,
+            win_length=self.win_length,
+            window=taper,
+            center=True,
+            pad_mode="constant",
+        )
+        power = (np.abs(stft) ** 2.0).astype(np.float32)
+
+        filters = librosa.filters.mel(
+            sr=self.sample_rate,
+            n_fft=self.n_fft,
+            n_mels=mels,
+            fmin=self.fmin,
+            fmax=self.fmax,
+            norm="slaney",
+        ).astype(np.float32)
+        feature = np.log(filters @ power + guard)
+
+        # Per-feature (per mel bin) standardisation over time. ddof=1 matches
+        # NeMo; ddof=0 is a different number on an 800-frame window.
+        mean = feature.mean(axis=1, keepdims=True)
+        std = feature.std(axis=1, ddof=1, keepdims=True) + self.std_eps
+        feature = (feature - mean) / std
+
+        return feature[:, :frames].reshape(shape).astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 
 
