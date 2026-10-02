@@ -2,8 +2,9 @@
 #
 # GENERATED from a survey of ~/dnsmos_exported and ~/eco8-neaixt, then verified
 # entry by entry against the cited sources. 112 findings were extracted, all
-# 112 survived verification, and they merge into the 82 distinct constraints
-# below. Edit by hand freely — this is the zoo's institutional memory, not a
+# 112 survived verification, and they merged into 82 distinct constraints.
+# Seven more, and corrections to two of the 82, came from ~/stm32n6-tts (the
+# Citrinet-256 bring-up, GitHub LarocheC/stm32n6-stt), for 89 below. Edit by hand freely — this is the zoo's institutional memory, not a
 # build artifact — but keep every entry's `sources`, because a remedy nobody
 # has actually run is a hypothesis.
 #
@@ -1225,6 +1226,51 @@ detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ST_BUG_REPORT.md", "/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/FEASIBILITY.md"]
 
 [[issue]]
+id            = "psram-spill-with-zero-sw-epochs"
+failure_class = "SILENT_ACTIVATION_SPILL_TO_PSRAM"
+stage         = "compile"
+zoo_action    = "compile-postcondition"
+title         = """
+    SILENT: a compile can move activations to PSRAM while still reporting 0 SW
+    and 0 hybrid epochs, and its cycle total goes DOWN
+    """
+symptom       = """
+    The compile succeeds and every headline number looks right. Citrinet-256 at
+    a 12 s window (T=1200), on ST's audio-application mpool with ST's own
+    option string, reports `Total number of epochs 618`, `>> pure software (SW)
+    epochs 0`, `>> hybrid epochs 0` - and puts 150.000 kB of activations in
+    hyperRAM at 0x90000000-0x90025800. The epoch table cannot show it because a
+    spilled buffer is not a software epoch. Worse, the scheduler's own cycle
+    total does not show it either: the spilled build reports 123,775,024 cycles
+    against 124,080,680 for the fully on-chip build, so the spill reads as very
+    slightly FASTER. Measured traffic on the spilled buffer: 153,600 B read +
+    153,600 B written, 1,152,000 modelled cycles.
+    """
+cause         = """
+    The allocator spills to whatever external memory the mpool offers it, and
+    ST's audio mpool offers 16 MB of hyperRAM (xSPI1). Two numbers a reader
+    naturally treats as the health check - the epoch mapping table and the
+    predicted cycle count - are both blind to placement. The cycle model does
+    not price PSRAM pressure, and epochs are about which engine runs an op, not
+    about which pool its buffers landed in.
+    """
+workaround    = """
+    Gate on the per-pool placement line, not on the epoch table and not on the
+    cycle total: assert `hyperRAM ... 0 B` and the expected flash base in
+    `network_generate_report.txt`, both single greps. Two independent
+    cross-checks exist for a clean run: `st_ai_ws/neural_art__network/
+    atonbuf.xSPI1.raw` is 0 bytes, and every `hyperRAM (r/w/cycles)` column of
+    the `--csv-file` output sums to 0. On this graph `--Oauto-sched` removes
+    the spill outright (600.000 kB cpuRAM2 + 417.188 kB npuRAM6, 0 B hyperRAM,
+    628 epochs, 0 SW) - ST's audio application ships WITHOUT that flag, so the
+    option set a firmware integration inherits is the one that spills.
+    """
+silent        = true
+is_infra      = false
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/compile/GATE2.md", "/home/claroche/stm32n6-tts/compile/reports/g1200_st/summary.txt", "/home/claroche/stm32n6-tts/compile/DECISION-oauto-sched.md"]
+
+[[issue]]
 id            = "quantize-static-emits-unquantized-graph"
 failure_class = "SILENT_NOOP_QUANTIZATION"
 stage         = "quantize"
@@ -1416,6 +1462,51 @@ detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md", "/home/claroche/eco8-neaixt/LISENNET_NPU_HANDOVER.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md"]
 
 [[issue]]
+id            = "app-slot-512k-overflow-into-weights"
+failure_class = "FLASH_SLOT_OVERFLOW_OVERWRITES_WEIGHTS"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    SILENT: the application slot between 0x70100000 and the weight base is
+    512 KiB, and a large generated `network.c` overflows it into the weights
+    """
+symptom       = """
+    The build succeeds and the flash writes succeed. ST's layout puts the
+    signed application at 0x70100000 and the weight blob at 0x70180000, which
+    leaves the application exactly 524,288 B. Stock (ST's Yamnet-1024 AED
+    model) is 244,544 B and nothing complains. Citrinet-256 at T=800 produces a
+    9,967,286 B `network.c` against the AED model's 810,318 B; its object file
+    alone is 520,957 B of read-only image (437,705 B .rodata of epoch and
+    descriptor tables, 83,252 B .text), and the linked binary is 714,432 B -
+    190,144 B past the slot. Flashing it would write the tail of .text over the
+    start of the weight blob, after which the network reads garbage while every
+    log looks clean. (Caught here by comparing the binary size to the slot; the
+    corrupted-weights run was never performed.)
+    """
+cause         = """
+    Nothing in the toolchain knows about the slot. It is the distance between
+    two addresses chosen in two different scripts - the app base in
+    `sign-and-flash-model.sh` and the `--change-addresses 0x70180000` in
+    `generate-n6-model.sh` - and the linker script describes RAM, not this. A
+    model's contribution to image size is its epoch table, which scales with
+    epoch count rather than with weights or MACs, so a small model with many
+    epochs is the dangerous shape.
+    """
+workaround    = """
+    Move the weight base. 0x70400000 gives the application 3 MB and costs
+    nothing: recompiled there, Citrinet-256 is still 628 epochs, still 0 SW and
+    0 hybrid, still 625.000 kB of activations in cpuRAM2 + npuRAM6, only the
+    octoFlash range moves (0x70400000-0x70DBA700). Change it in BOTH places -
+    the mpool's octoFlash offset and the objcopy `--change-addresses` - or the
+    blob and the compiled base disagree silently. Then add
+    `arm-none-eabi-size` against the slot to the build script and fail loudly.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/WORKLIST.md", "/home/claroche/stm32n6-tts/compile/reports/g800_stt_0x70400000/summary.txt", "/home/claroche/stm32n6-tts/compile/stt_audio.mpool"]
+
+[[issue]]
 id            = "compiler-chooses-io-layout-per-graph"
 failure_class = "IO_LAYOUT_REORDERED"
 stage         = "validate"
@@ -1604,6 +1695,60 @@ detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_router/README.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_optionC/README.md"]
 
 [[issue]]
+id            = "signing-without-align-unbootable-image"
+failure_class = "SILENT_UNBOOTABLE_SIGNED_IMAGE"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    SILENT: signing without `-align` computes the wrong entry point and the
+    board is completely dead with byte-perfect flash
+    """
+symptom       = """
+    No output at all, at any baud, in either boot-switch position, after a
+    power cycle or a reset. Every step reports success: the build links, the
+    signing tool exits 0, all three flash writes print `File download
+    complete`, and a read-back from the board matches the signed binary
+    byte-for-byte (both 0x70000000 and 0x70100000 begin `53544d32`, `STM3`).
+    Indistinguishable from a dead board, a wrong baud, a bad clock config or a
+    hang in early init - all of which were eliminated one by one first, at the
+    cost of most of a day and several boot-switch round trips.
+    """
+cause         = """
+    `STM32_SigningTool_CLI --align` pads the payload to a 0x400 offset. Without
+    it the payload starts at the wrong offset and the header's COMPUTED entry
+    point at +0x70 is wrong by exactly that confusion. Measured on one
+    identical .bin signed four ways: ST's Makefile flags (`-s -bin -nk -t ssbl
+    -hv 2.3`) give entry 0x34002F79; adding `-align` gives 0x340167BD, which is
+    Reset_Handler and the ELF entry point. 0x34002F79 is in the middle of
+    .text (0x34000750-0x3401ACC8), so the FSBL jumps into the interior of a
+    function and the part dies before UART init. The code was never broken:
+    under the documented dev-mode gdb workflow the same image reaches
+    MPU_Config -> Int_Mem_Config -> Ext_Mem_Config -> NPU_Config -> IAC_Config
+    -> UART_Config in order and runs. `-align` is mandatory on CubeProgrammer
+    2.21+ (this bench runs 2.22.0) and ST's own `bm.mk:39` does not pass it.
+    """
+workaround    = """
+    Sign with `-align`:
+        STM32_SigningTool_CLI -s -bin app.bin -nk -t ssbl -hv 2.3 -align -o app_sign.bin
+    Then VERIFY BEFORE FLASHING - the word at +0x70 of the signed image must
+    equal Reset_Handler from `nm`. Two commands, and they catch a silently
+    unbootable image before it costs a boot-switch round trip:
+        test "$(xxd -e -g4 -s 0x70 -l 4 app_sign.bin | awk '{print $2}')" \\
+           = "$(arm-none-eabi-nm app.elf | awk '/ Reset_Handler/{print $1}' \\
+                | sed 's/^0*//' | awk '{printf "%x\\n", strtonum("0x"$1)+1}')" \\
+          && echo "entry point OK"
+    `-ep <addr>` also works and `-align -ep -la` works; plain ST flags do not.
+    NOTE the near miss: `config/toolchain.toml` already carried the knowledge
+    ("2.21 introduced the mandatory -align on signing"). The note existed and
+    was simply never connected to a symptom that looks like a dead board, which
+    is the argument for keeping this catalogue keyed on SYMPTOMS.
+    """
+silent        = true
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE3.md", "/home/claroche/stm32n6-deployment-zoo/config/toolchain.toml"]
+
+[[issue]]
 id            = "sw-epoch-large-output-corruption"
 failure_class = "SILENT_RUNTIME_OUTPUT_CORRUPTION"
 stage         = "runtime"
@@ -1699,6 +1844,54 @@ detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/RESULTS_LISENNET.md", "/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
 
 [[issue]]
+id            = "ai-dpu-model-check-rejects-int8-rank3-output"
+failure_class = "APP_MODEL_CHECK_REJECTS_VALID_OUTPUT"
+stage         = "runtime"
+zoo_action    = "board-invariant"
+title         = """
+    `ai_dpu.c`'s model check rejects int8 rank-3 outputs into Error_Handler()
+    and a hang; it passes ST's own models only because those are float32
+    """
+error_signature = "AI_DPU: Output format not supported"
+symptom       = """
+    The application prints its banner, then stops for good. The last line is
+    `AI_DPU: Output format not supported`, followed by `AI_DPU: Check model
+    Failed`, after which `AiDPULoadModel()` calls `Error_Handler()`, which is
+    `__disable_irq(); while(1);`. Nothing else ever prints and no fault is
+    raised, so it reads as a startup hang rather than as a rejected model.
+    (Signature transcribed from the source literal at `Projects/Dpu/
+    ai_dpu.c:109`, reached via `LogError` at LOG_ERROR, which the package's
+    default LOG_LEVEL=LOG_INFO does print - `Projects/Common/logging.c`,
+    `LogLevel <= LOG_LEVEL`. It was predicted from the source and patched
+    before flashing, so this exact line has not been read off a UART here.)
+    """
+cause         = """
+    `AiDPUCheckModel()`, `Projects/Dpu/ai_dpu.c:99-107`:
+        if (STAI_FORMAT_FLOAT32 != pxInfo->outputs[i].format &&
+            2 != pxInfo->outputs[i].shape.size)
+    `stai_shape` is a `stai_array_s32`, so `.size` is the RANK, not a byte
+    count. A CTC head is `STAI_FORMAT_S8` at rank 3 - {100, 1025, 1} here - so
+    both conjuncts hold and the model is rejected. ST's own AED and SE models
+    survive the check only because their outputs are float32. The INPUT check
+    at :88-98 is fine: it short-circuits on STAI_FORMAT_S8.
+    """
+workaround    = """
+    Add the format to the disjunction:
+        if (STAI_FORMAT_FLOAT32 != pxInfo->outputs[i].format &&
+            STAI_FORMAT_S8      != pxInfo->outputs[i].format &&
+            2 != pxInfo->outputs[i].shape.size)
+    Also note that `AiDPULoadModel()` indexes `shape.data[AI_DPU_WIDTH=1]` and
+    `[AI_DPU_HEIGHT=2]` into in_width/in_height/out_height, which on a rank-3
+    tensor yields meaningless values (in_width=800, in_height=1,
+    out_height=1025). Harmless as long as nothing downstream reads them, which
+    stops being true if `printInferenceResults` is kept.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/WORKLIST.md", "/home/claroche/stm32n6-tts/firmware/apply_vendor_mods.sh", "/home/claroche/stm32n6-tts/vendor/STM32N6-GettingStarted-Audio/Projects/Dpu/ai_dpu.c"]
+
+[[issue]]
 id            = "boot-switch-not-in-development-mode"
 failure_class = "BOOT_MODE_MISCONFIGURED"
 stage         = "board"
@@ -1788,6 +1981,52 @@ detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/firmware_optionC/README.md"]
 
 [[issue]]
+id            = "ll-aton-middleware-version-mismatch"
+failure_class = "STALE_RUNTIME_MIDDLEWARE"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    INFRA: the app's bundled ll_aton middleware is version-locked to the exact
+    stedgeai build that generated network.c, down to the dev number
+    """
+error_signature = "Possible mismatch in ll_aton library used"
+symptom       = """
+    The FIRMWARE BUILD FAILS - it does not warn - on the generated model
+    source:
+        network.c:57:4: error: #error "Possible mismatch in ll_aton library used"
+    Dropping a model generated by a newer ST Edge AI Core into an application
+    package that vendors an older runtime cannot work, and matching the
+    major/minor is not enough to satisfy it.
+    """
+cause         = """
+    `network.c` guards on all four version components with `!=`, so
+    LL_ATON_VERSION_DEV must be equal too. Measured here: the package ships
+    atonn-v1.1.3-262-g7cc65410, ST Edge AI Core 4.0.1-20581 generates against
+    atonn-v1.1.3-275-g6770925d. Same 1.1.3, different dev, hard error. ST
+    versions the application package and the compiler independently and ships
+    them mismatched.
+    """
+workaround    = """
+    Move the APPLICATION onto the compiler's runtime, not the other way
+    round: copy Inc/Lib/Misc/Npu/Reloc/SystemPerformance from
+    `<stedgeai>/Middlewares/ST/AI` over the package's `Middlewares/ST/AI`,
+    and follow the runtime-library rename in the Makefile
+    (NetworkRuntime1200_CM55_GCC.a -> NetworkRuntime1201_CM55_GCC.a).
+    Downgrading the compiler instead invalidates every compile-stage number
+    already recorded against the model. Two knock-on effects, both hit here:
+    the newer headers stop pulling in `assert.h` transitively, and GCC 14
+    makes an implicit function declaration an error, so
+    `Projects/Common/cpu_stats.c` needs an explicit `#include <assert.h>`.
+    Check the version pair BEFORE generating - one grep of
+    `Middlewares/ST/AI/Npu/ll_aton/ll_aton_version.h` against the toolchain's
+    copy - because the alternative is discovering it after a compile.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/README.md", "/home/claroche/stm32n6-tts/firmware/apply_vendor_mods.sh", "/home/claroche/stm32n6-tts/artifacts/model_c/network.c"]
+
+[[issue]]
 id            = "loading-internal-memories-overflow-large-epoch-count"
 failure_class = "INTERNAL_RAM_OVERFLOW_AT_LOAD"
 stage         = "board"
@@ -1816,6 +2055,52 @@ silent        = false
 is_infra      = true
 detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/npu_structure_bench/RESULTS.md"]
+
+[[issue]]
+id            = "make-command-line-opt-override-discards-appends"
+failure_class = "BUILD_FLAGS_SILENTLY_DROPPED"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    Overriding `OPT` on the make command line discards every `OPT +=` in ST's
+    Makefile, and the resulting error names a CMSIS-DSP vector type
+    """
+error_signature = "incompatible types when initializing type 'uint16x8_t' using type 'int16x8_t'"
+symptom       = """
+    Adding a define or an include path the obvious way - `make bm OPT="..."` -
+    breaks the build somewhere that has nothing to do with the change:
+        .../StatisticsFunctions/arm_absmax_no_idx_q15.c:59:37: error:
+          incompatible types when initializing type 'uint16x8_t' using type 'int16x8_t'
+              uint16x8_t curExtremValVec = vdupq_n_s16(Q15_ABSMIN);
+    and similarly for q31/q7 in arm_absmax/absmin_no_idx. Nothing mentions the
+    override. Reproduced by re-running one recorded compile line with the flag
+    removed: the first file to fail is
+    Drivers/CMSIS/DSP/Source/StatisticsFunctions/StatisticsFunctions.c.
+    """
+cause         = """
+    A variable set on the make command line overrides every assignment in the
+    makefile, INCLUDING `+=`, unless the makefile marks it `override`. ST's
+    Makefile builds its flags as `OPT = -g3 -Os` (line 5) followed by
+    `OPT += ...` (lines 225-227), so an override silently deletes
+    `-flax-vector-conversions` - which CMSIS-DSP's MVE paths need, because they
+    initialise unsigned vector types from signed `vdupq_n_*` intrinsics - along
+    with `-Wall -fstack-usage -fdata-sections -ffunction-sections
+    --specs=nano.specs` and the `-MMD -MP` dependency generation.
+    """
+workaround    = """
+    Never set OPT on the command line for this package. Add an extension point
+    instead - one line after the last append:
+        OPT += $(EXTRA_CFLAGS)
+    and pass `EXTRA_CFLAGS="-DFOO -I/path"`. The dropped section flags are the
+    part to worry about beyond the loud failure: a build that happens not to
+    touch CMSIS-DSP loses -fdata-sections/-ffunction-sections and grows,
+    which on this part is measured against a hard 512 KiB application slot
+    (see `app-slot-512k-overflow-into-weights`).
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/firmware/apply_vendor_mods.sh", "/home/claroche/stm32n6-tts/vendor/STM32N6-GettingStarted-Audio/Projects/GS/Makefile"]
 
 [[issue]]
 id            = "missing-ll-aton-runtimeinit-parks-forever"
@@ -1916,6 +2201,45 @@ detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
 
 [[issue]]
+id            = "st-makefile-passes-fcyclomatic-complexity"
+failure_class = "VENDOR_ONLY_COMPILER_FLAG"
+stage         = "board"
+zoo_action    = "board-invariant"
+title         = """
+    ST's Makefile passes `-fcyclomatic-complexity`, which is not an upstream
+    GCC option, so the ST-validated Arm GNU 13.3 cannot build ST's own example
+    """
+error_signature = "unrecognized command-line option '-fcyclomatic-complexity'"
+symptom       = """
+    Building STM32N6-GettingStarted-Audio with the toolchain the zoo pins -
+    arm-gnu-toolchain-13.3.rel1, the version ST document as validated for
+    Cortex-M55 - fails immediately:
+        arm-none-eabi-gcc: error: unrecognized command-line option '-fcyclomatic-complexity'
+    The error names a flag, which sends the reader looking for where the flag
+    came from rather than for which compiler is missing.
+    """
+cause         = """
+    `-fcyclomatic-complexity` is an ST addition, present only in the
+    "GNU Tools for STM32" compiler shipped inside STM32CubeCLT / STM32CubeIDE,
+    and `Projects/GS/Makefile:225-226` passes it unconditionally in C_FLAGS.
+    The validated toolchain version and the toolchain that can build ST's own
+    examples are not the same toolchain.
+    """
+workaround    = """
+    Build with ST's compiler:
+        make bm -j8 GCC_PATH=<stm32cubeclt>/GNU-tools-for-STM32/bin
+    (GNU Tools for STM32 14.3.rel1 accepts the flag and builds clean.) A shim
+    that strips the flag also works with vanilla Arm GNU 13.3 and produces a
+    working image - both lineages were flashed and both ran, so this is a build
+    blocker, not a correctness one. Do NOT reach for `OPT=` on the command line
+    to remove it; see `make-command-line-opt-override-discards-appends`.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE3.md", "/home/claroche/stm32n6-tts/vendor/STM32N6-GettingStarted-Audio/Projects/GS/Makefile"]
+
+[[issue]]
 id            = "sw-dequantizelinear-epoch-hang"
 failure_class = "DEVICE_HANG_IN_SW_EPOCH"
 stage         = "runtime"
@@ -1992,6 +2316,55 @@ detectable_statically = false
 sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/ONBOARD_MEASUREMENT.md"]
 
 [[issue]]
+id            = "hotplug-fails-after-first-boot-from-flash"
+failure_class = "SWD_CONNECT_MODE_LATCHED_AT_RESET"
+stage         = "board"
+zoo_action    = "infra-retry"
+title         = """
+    INFRA: `mode=HOTPLUG` stops working once a board has been booted from
+    flash, in BOTH switch positions; `mode=UR` still works
+    """
+# Deliberately NO error_signature. This failure prints `Unable to get core ID`
+# and `No STM32 target found`, and the second of those is already the signature
+# of `no-stm32-target-found-on-swd`, whose remedy (press RESET) is a different
+# one. Two entries matching the same text would make which remedy you get an
+# accident of string length. The amendment at the end of this file puts the
+# mode=UR remedy on the existing entry instead, where the match already lands.
+symptom       = """
+    `STM32_Programmer_CLI -c port=SWD mode=HOTPLUG` fails with
+    `Unable to get core ID` / `No STM32 target found` even after the boot
+    switches are returned to the development position - on a board where
+    HOTPLUG worked before it was ever booted from flash. It looks exactly like
+    the wedged-probe entry, whose remedy is a physical replug, and reaching for
+    that first wastes the trip.
+    """
+cause         = """
+    The boot configuration is latched at reset, so moving a switch under power
+    changes nothing until the next reset. HOTPLUG attaches to a running target
+    and never asserts NRST, so it never gets one. `mode=UR` (connect under
+    reset) asserts NRST and catches the part early, which is why it works in
+    both positions.
+    """
+workaround    = """
+    Use `mode=UR` rather than `mode=HOTPLUG` (the zoo's loader path assumes
+    HOTPLUG). Measured access matrix on this board, both positions:
+        operation                    dev      flash-boot
+        mode=HOTPLUG connect         fails    fails
+        mode=UR connect              works    works
+        read external flash          works    works
+        erase / write ext. flash     works    fails
+        ST-LINK_gdbserver halt       fails    fails
+    So erasing needs the development position and reading does not. Separately,
+    `ST-LINK_gdbserver` cannot halt this part at all with `--halt`/`-k`; ST's
+    documented invocation is `-m 1 -g` - access port 1, attach to a RUNNING
+    target - and even that only gets further in the development position.
+    """
+silent        = false
+is_infra      = true
+detectable_statically = false
+sources       = ["/home/claroche/stm32n6-tts/board/GATE3.md"]
+
+[[issue]]
 id            = "no-stm32-target-found-on-swd"
 failure_class = "SWD_TARGET_NOT_FOUND"
 stage         = "board"
@@ -2010,11 +2383,20 @@ cause         = """
     re-establishes it. (Source records symptom and remedy only; the mechanism is
     inference.) Board-side only.
     """
-workaround    = "Press the black RESET button on the DK and retry."
+workaround    = """
+    Press the black RESET button on the DK and retry. If that does not help
+    and the board has ever been booted from flash, use `mode=UR` instead of
+    `mode=HOTPLUG`: the boot configuration is latched at reset, HOTPLUG
+    attaches to a running target and never asserts NRST, and mode=UR
+    (connect under reset) catches the part early. See
+    `hotplug-fails-after-first-boot-from-flash` for the measured access
+    matrix - notably that erasing external flash needs the development switch
+    position while reading it does not.
+    """
 silent        = false
 is_infra      = true
 detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md"]
+sources       = ["/home/claroche/eco8-neaixt/n6_band_debug_kit/HANDOVER.md", "/home/claroche/stm32n6-tts/board/GATE3.md"]
 
 [[issue]]
 id            = "npu-profiler-per-layer-serial-timeout"
@@ -2720,38 +3102,6 @@ silent        = false
 is_infra      = false
 detectable_statically = false
 sources       = ["/home/claroche/dnsmos_exported/examples/convfsenet_ondevice/ONBOARD_RESULTS.md"]
-
-[[issue]]
-id            = "ll-aton-middleware-version-mismatch"
-failure_class = "STALE_RUNTIME_MIDDLEWARE"
-stage         = "board"
-zoo_action    = "document-only"
-title         = """
-    INFRA: the app's bundled ll_aton middleware is version-locked to the
-    stedgeai that generated network.c
-    """
-error_signature = "Possible mismatch in ll_aton library used"
-symptom       = """
-    `make build` warns \"Possible mismatch in ll_aton library used\" when the
-    app's bundled NPU middleware version does not match the ST Edge AI Core
-    version that generated network.c.
-    """
-cause         = """
-    `STM32N6-GettingStarted-Audio` ships an `ll_aton` locked to stedgeai 4.0.0
-    while the generator installed here is 4.0.1; generator and runtime must
-    agree. In practice 4.0.x was accepted and the source heads the section
-    'largely resolved'.
-    """
-workaround    = """
-    Keep generator and app on the same major/minor (4.0.x was accepted here), or
-    refresh the app's `ll_aton` per ST's \"update project with a new version of
-    ST Edge AI Core\" procedure, or check out an app tag built with the matching
-    version.
-    """
-silent        = false
-is_infra      = true
-detectable_statically = false
-sources       = ["/home/claroche/eco8-neaixt/deploy/stm32n6/README.md"]
 
 [[issue]]
 id            = "per-channel-int32-bias-adjustment-trips"
