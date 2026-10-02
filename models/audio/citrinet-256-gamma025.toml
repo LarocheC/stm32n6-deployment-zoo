@@ -1,0 +1,246 @@
+# Drafted against the evidence in ~/stm32n6-tts, not by `zoo init`: this graph
+# was funnelled by hand before the funnel could express it. Every value below
+# is transcribed from a file in that repo and the transcription is cited, so a
+# reviewer can check any line without rerunning anything.
+#
+# (~/stm32n6-tts is the local checkout of github.com/LarocheC/stm32n6-stt.)
+#
+# Three things need zoo work before this recipe runs end to end, so the graph
+# is disabled. Without them it reaches the compiler with the rank-3 SE MatMul
+# and records the known internal error, which is not a finding.
+#   * none of the six rewrites is a zoo patch yet (stm32n6-stt model/ is the
+#     reference). Four run before quantisation and go in `patches` below.
+#   * two run AFTER quantisation, on the QDQ graph: fold_stride2 and
+#     break_relu_chain. The funnel has no post-quantisation patch stage
+#     (recipe patches run at screen time, before stage_quantize). Without them
+#     the graph compiles clean and then hangs the NPU (atlas:
+#     stride2-depthwise-conv-stalls-npu, activ-to-convacc-stream-link-stalls-npu)
+#   * `[postconditions]` is a new table the loader does not read yet
+# Symmetric activations, the fourth gap at Gate 3, is the [quantize] table below.
+schema = 1
+id      = "citrinet-256-gamma025"
+source  = "OpenVoiceOS/stt_en_citrinet_256_gamma_0_25_onnx"
+domain  = "audio"
+task    = "automatic-speech-recognition"
+tier    = 3        # 1=screen  2=measure on board  3=firmware demo
+license = "cc-by-4.0"
+notes   = "lab/citrinet-256-gamma025.md"
+
+# Why this model is in the zoo at all: it is the counter-example to
+# whisper-tiny-en. Same domain, same board, same compiler — 628 epochs, none of
+# them software, everything on-chip, against Whisper-tiny's 391 epochs with 184
+# in software and 16.4 MB spilled to PSRAM. A convolutional CTC encoder is what
+# this part is for, and the leaderboard should be able to say so with a row
+# rather than with prose.
+#
+# `gamma_0_25` is `kernel_size_factor: 0.25` — scaled temporal kernels, not a
+# quantisation variant (docs/nemo_model_config.yaml:30, repeated on all 22
+# blocks). NeMo and PyTorch are NOT required: this is a pre-exported ONNX of
+# the NGC checkpoint nvidia/stt_en_citrinet_256_gamma_0_25.
+
+[fetch]
+provider = "hf_onnx"
+# Pinned, and verified rather than assumed: the LFS oid of model.onnx at this
+# revision is 3e66724e62f5307b0b2bb546e4d2c064e188a9dc779d12ca707dbd277ad7753d,
+# which is the sha256 of the local artifacts/onnx/citrinet256_g025.fp32.onnx
+# every number in this recipe was produced from.
+revision = "3362d8d46028368e02434a3fc7655e4f32117ef6"
+
+[[graph]]
+id   = "encoder-ctc"
+file = "model.onnx"          # repo root, not onnx/ — matched exactly by stage_fetch
+# fp32 on disk: 39.3 MB (39,334,433 B), ir=8, opset=17, 1,436 nodes.
+# One invocation covers the whole pinned window, so the RTF column answers
+# "does an 8-second utterance take less than 8 seconds to transcribe".
+realtime_ms = 8000.0
+enabled     = false
+skip_reason = "needs six graph rewrites that are not zoo patches yet, two of them after quantisation, which the funnel has no stage for; without them the graph compiles and then hangs the NPU (reference: stm32n6-stt model/)"
+
+# Four rewrites take this export from "the compiler crashes" to 503 nodes of
+# exactly seven hardware-mapped types (Conv 282 — 107 of them grouped or
+# depthwise — Relu 130, ReduceMean 23, Sigmoid 23, Mul 23, Add 21, Transpose 1).
+# Reference implementation: model/clean.py in stm32n6-stt, one numbered block
+# per patch. Each still has to pass the zoo's parity gate.
+#
+#   drop_dead_where_mask       the export's length-masking branch. `Where` with
+#                              an all-False constant condition; statically dead
+#                              once `length` is folded, but it survives as a
+#                              node the NPU cannot map.
+#   reducesum_div_to_reducemean  the squeeze-excitation masked pooling, exported
+#                              as ReduceSum(axes=[-1]) then Div by a constant.
+#                              As exported it leaves an fp32 island that ORT's
+#                              QDQ pass will not quantise through.
+#   se_matmul_to_conv1x1       the important one. The SE fully-connected pair
+#                              `Transpose -> MatMul(const) -> Relu ->
+#                              MatMul(const) -> Transpose` is a rank-3 MatMul,
+#                              which hits a compiler internal error. A 1x1
+#                              convolution is numerically identical (weights
+#                              transposed, trailing singleton axis) and deletes
+#                              46 Transpose nodes on the way.
+#   drop_trailing_logsoftmax   CTC greedy decoding is argmax, and LogSoftmax is
+#                              a monotone per-frame transform that argmax does
+#                              not see. It costs an epoch and, being unbounded
+#                              below, quantises badly.
+patches = [
+  "drop_dead_where_mask",
+  "reducesum_div_to_reducemean",
+  "se_matmul_to_conv1x1",
+  "drop_trailing_logsoftmax",
+]
+# After quantisation, on the QDQ graph (no funnel stage for these yet):
+#   fold_stride2_into_pointwise  stride-2 depthwise conv stalls the NPU forever.
+#                              Move the stride to the following group=1 k=1
+#                              conv; bit-exact, 3 sites, no node added
+#                              (model/fold_stride2.py).
+#   keep_relu_on_4d_tensor     a Reshape between a conv and its Relu makes atonn
+#                              chain the Relu forwards into the next depthwise
+#                              conv's data port (ACTIV -> CONVACC), which stalls.
+#                              Run Relu and its Q/DQ on the 4-D tensor; 84
+#                              sites, skip any Relu not fed by a Conv
+#                              (model/break_relu_chain.py). 448 epochs vs 618.
+# Note: clean.py renames the graph output when it drops the LogSoftmax, so the
+# output name below holds only if the zoo patch keeps the exporter's name.
+
+[graph.pin]
+# 80 mel bands and 800 frames at a 160-sample hop = an 8-second window at
+# 16 kHz. All three axes carry names in the export, so --fix-parametric-shapes
+# can address them; none is anonymous.
+#
+# 8 s is a measured choice, not a default. Against the full spoken reference on
+# 150 natural-length dev-clean utterances, a 4 s window returns 0.56 of the
+# words and scores 47.7 % WER — truncation, which a user reads as "it cannot
+# understand me". 8 s returns 0.84 at 20.0 %. Going further to 12 s buys 0.95
+# but costs accuracy on short utterances (6.15 % -> 8.21 %), because
+# per-feature normalisation statistics computed over a mostly-silent window
+# drift. docs/FEASIBILITY.md section 2(a)-(b).
+"audio_signal_dynamic_axes_1" = 1
+"audio_signal_dynamic_axes_2" = 800
+"length_dynamic_axes_1" = 1
+
+  [[graph.input]]
+  name  = "audio_signal"
+  role  = "feature"
+  shape = [1, 80, 800]
+  dtype = "float32"
+  calib = "audio_folder"
+
+  [[graph.input]]
+  # NeMo's sequence-length input, rank 1 int64. Folding it to an initializer is
+  # what makes the length-masking `Where` statically dead, and it removes the
+  # rank-1-graph-input rejection at the same time.
+  name  = "length"
+  role  = "constant"
+  shape = [1]
+  dtype = "int64"
+  value = 800
+
+  [[graph.output]]
+  name = "logprobs"
+  # [1, 100, 1025] at this window, and it is logits rather than log-probs once
+  # drop_trailing_logsoftmax has run — the name is the exporter's, kept so the
+  # recipe still matches the file. Subsampling factor 8: one output frame per
+  # 80 ms. 1025 classes = 1024 SentencePiece unigram pieces + blank at id 1024.
+
+[variants]
+# `onchip` alone is the honest ladder for this graph: 9.7 MB of weights cannot
+# be on-chip on this part, so the rung that matters is whether ACTIVATIONS stay
+# there, which is what `onchip` asks. `extflash` is where it actually ships.
+profile         = ["onchip", "extflash"]
+precision       = ["int8"]
+# No `m55` row. The NPU-vs-CPU speedup is interesting where both are viable;
+# 2.234 GMAC on a Cortex-M55 is not a deployment anyone would choose, and the
+# run costs a compile.
+backend         = ["npu"]
+policy          = "first_success"
+
+[calibration]
+# Real speech, put through the model's OWN front end — the same NumPy front end
+# (`model/fe.py` in stm32n6-stt) that is simultaneously the spec the M55
+# implementation is written against and the oracle its tests compare to.
+# `log_mel_nemo` is contributed alongside this recipe and reproduces that file
+# bit-for-bit (max |difference| 0.0 over an 80x800 block).
+#
+# Calibrating this graph on raw waveform would not merely be inaccurate, it
+# would be the wrong kind of object; calibrating on Gaussian noise would set
+# every activation range from a distribution the board will never see. And the
+# front end is not interchangeable with a neighbouring one: swapping the log
+# guard from 2**-24 to 1e-2 moves WER from 5.83 % to 30.80 %
+# (eval/results/fe.log).
+provider     = "audio_folder"
+dataset      = "~/stm32n6-tts/corpus/LibriSpeech/dev-clean"
+preprocessor = "log_mel_nemo"
+# 48, not the policy default of 128: this is what produced the shipped
+# artifact (model/q800.py), whose accuracy is measured at 5.41 % WER int8
+# versus 4.91 % fp32 on 373 held-out utterances, 95 % CI [+0.07, +0.94]
+# (eval/GATE1.md). Raising it is a change to the model, not a free improvement
+# — the atlas already records calibration-set size changing compiled latency.
+n            = 48
+seed         = 7
+
+  [calibration.options]
+  # 300 ms of leading silence, so a clip starts where the evaluation harness
+  # starts it. The window is still 799*160+1 samples; this trades real audio
+  # for lead-in rather than lengthening the buffer.
+  lead_silence_samples = 4800
+  preemphasis          = 0.97
+  log_guard            = 5.960464477539063e-08   # 2**-24. Do not raise it.
+
+[quantize]
+# Symmetric activations, as the shipped artifact was built: all 1,419 Q/DQ
+# zero-points are exactly 0, the input QuantizeLinear reads scale 0.12052242 /
+# zero-point 0, and the M55 front end quantises with q = round(x / scale) and no
+# offset term. An asymmetric re-quantisation would bias every feature by a
+# constant (greedy CTC would still decode, so it shows up as WER, not a crash).
+activation_symmetric = true
+
+# ---------------------------------------------------------------------------
+# Postconditions — the regression gate
+# ---------------------------------------------------------------------------
+# Risk 4 of docs/FEASIBILITY.md is that none of this is promised by ST. The word
+# "group" appears ZERO times in stneuralart_operator_support.html r1.3, yet all
+# 107 grouped convolutions reach hardware. That is an empirical property of
+# compiler 4.0.1-20581 (ll_aton 1.1.3-275) with no vendor commitment behind it,
+# so the deployed compile is pinned here as a gate on any toolchain bump.
+#
+# These are the DEPLOYED build's numbers (stm32n6-stt
+# artifacts/compile/r19_relu4dall84, README "On silicon"; board/GATE4.md
+# Round 19): 448 epochs, 0 SW, 0 hybrid, 300 kB cpuRAM2 + 425 kB npuRAM6, no
+# PSRAM, weights at 0x70400000, 124.035 ms measured. The Gate 2 compile this
+# table first pinned (628 epochs, 625 kB) passes every compile check and HANGS
+# on the board, which is why the link count below matters more than any of the
+# numbers. artifacts/ is not in git, so the exact byte counts and the option
+# string could not be re-read: activations_bytes_max is 300 kB + 425 kB at
+# 1,024 B/kB, and the options are most likely ST's audio string plus
+# --Oauto-sched (compile/gen_model.sh). Read the report before relying on them.
+#
+# Keys are the compile stage's own metric names (zoo/st/cinfo.py,
+# CompileInfo.metrics()) except where noted.
+[postconditions]
+epochs_total          = 448
+epochs_sw             = 0
+activations_bytes_max = 742400     # 725 kB, in cpuRAM2 + npuRAM6 only
+pool_placement        = "weights-in-flash"
+# Not a c_info metric: stream-switch links from an ACTIV unit into a CONVACC
+# data port, counted in network.c (stm32n6-stt compile/score_build.py). Every
+# one stalled on silicon; the epoch table cannot see them.
+activ_to_convacc_links = 0
+
+  [postconditions.pools_max]
+  # Per-pool, because the pool is not fungible: npuRAM6 sits at 94.87 %.
+  # A total that fits can still fail to allocate. cpuRAM2 is held to the
+  # 512 KB that ST's boot layout guarantees (atlas:
+  # cpuram2-pool-overlaps-fsbl-region); the deployed build uses 300 kB.
+  hyperRAM = 0                     # any PSRAM spill fails the gate outright
+  cpuRAM2  = 524288
+  npuRAM6  = 458752
+
+  [postconditions.report_grep]
+  # Not in network_c_info.json — these come from network_generate_report.txt,
+  # which is why they are grepped rather than compared. The hybrid count has no
+  # c_info equivalent at all, and the placement line is the one that catches a
+  # PSRAM spill: at T=1200 under ST's options 150 KB of activations move to
+  # hyperRAM while the epoch table still reads 0 SW / 0 hybrid AND the cycle
+  # total goes DOWN. compile/GATE2.md section 5. Both strings were copied from
+  # the Gate 2 report; the deployed report's spacing has not been checked.
+  "hybrid epochs (using both software and hardware)    0" = true
+  "hyperRAM   [0x90000000 - 0x91000000]:          0  B"   = true

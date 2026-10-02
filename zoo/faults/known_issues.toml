@@ -6,7 +6,7 @@
 # Twenty-four more came from ~/stm32n6-tts (the Citrinet-256 bring-up, GitHub
 # LarocheC/stm32n6-stt): seven from its Gate 3 contribution, seventeen from
 # Gate 4 onward (the two NPU stalls, OTP, the audio app's traps), along with
-# corrections to eleven existing entries. Edit by hand freely — this is the zoo's institutional memory, not a
+# corrections to five of the original entries. Edit by hand freely — this is the zoo's institutional memory, not a
 # build artifact — but keep every entry's `sources`, because a remedy nobody
 # has actually run is a hypothesis.
 #
